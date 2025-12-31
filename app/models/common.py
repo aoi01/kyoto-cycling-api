@@ -11,7 +11,7 @@ FastAPIとPydanticを使用した型安全なモデルを提供します。
 - FastAPI Response Model: https://fastapi.tiangolo.com/tutorial/response-model/
 - Generic Types: https://docs.pydantic.dev/latest/concepts/models/#generic-models
 """
-from typing import TypeVar, Generic, Optional
+from typing import TypeVar, Generic, Optional, Literal
 from pydantic import BaseModel, Field
 from datetime import datetime
 
@@ -137,7 +137,7 @@ class GeoJSONPoint(BaseModel):
         type (str): 常に "Point"
         coordinates (list[float]): [経度, 緯度]
     """
-    type: str = Field(default="Point", const=True)
+    type: Literal["Point"] = "Point"
     coordinates: list[float] = Field(
         ...,
         min_length=2,
@@ -159,7 +159,7 @@ class GeoJSONLineString(BaseModel):
         type (str): 常に "LineString"
         coordinates (list[list[float]]): [[経度, 緯度], ...]の配列
     """
-    type: str = Field(default="LineString", const=True)
+    type: Literal["LineString"] = "LineString"
     coordinates: list[list[float]] = Field(
         ...,
         min_length=2,

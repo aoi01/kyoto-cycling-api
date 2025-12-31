@@ -79,7 +79,7 @@ class MapboxClient:
         
         参照: https://docs.mapbox.com/api/overview/#access-tokens-and-token-scopes
         """
-        self._access_token = pk.eyJ1IjoiYW9pOCIsImEiOiJjbWpwYnhrcmQxejljM2dxMWhwOWNhaWliIn0.4OAekJi1XmbCXRQe9HzJSA
+        self._access_token = access_token
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(connect=5.0, read=15.0, write=5.0, pool=10.0),
             limits=httpx.Limits(

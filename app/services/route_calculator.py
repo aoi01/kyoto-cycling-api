@@ -14,12 +14,7 @@ import math
 from typing import Optional, Callable, Union
 from dataclasses import dataclass
 import networkx as nx
-
-try:
-    import osmnx as ox
-    HAS_OSMNX = True
-except ImportError:
-    HAS_OSMNX = False
+import numpy as np
 
 from app.models.parking import Parking
 from app.models.port import Port
@@ -229,22 +224,41 @@ class RouteCalculator:
         return weight_func
     
     def _find_nearest_node(self, lon: float, lat: float, graph: nx.MultiDiGraph = None) -> int:
-        """座標から最寄りノードを検索"""
+        """
+        座標から最寄りノードを検索（NumPyベクトル化による高速化）
+
+        Args:
+            lon: 経度
+            lat: 緯度
+            graph: 検索対象グラフ（Noneの場合はself.graphを使用）
+
+        Returns:
+            最寄りノードのID
+        """
         G = graph if graph is not None else self.graph
-        
-        if HAS_OSMNX:
-            return ox.nearest_nodes(G, lon, lat)
-        
-        min_dist = float('inf')
-        nearest = None
-        for node in G.nodes():
-            node_x = G.nodes[node].get('x', 0)
-            node_y = G.nodes[node].get('y', 0)
-            dist = haversine_distance(lon, lat, node_x, node_y)
-            if dist < min_dist:
-                min_dist = dist
-                nearest = node
-        return nearest
+
+        # ノードIDと座標を配列に変換
+        nodes = list(G.nodes())
+        coords = np.array([[G.nodes[n].get('x', 0), G.nodes[n].get('y', 0)] for n in nodes])
+
+        # ベクトル化されたHaversine距離計算
+        target = np.array([lon, lat])
+
+        # 緯度経度をラジアンに変換
+        coords_rad = np.radians(coords)
+        target_rad = np.radians(target)
+
+        # Haversine公式（ベクトル化）
+        dlat = coords_rad[:, 1] - target_rad[1]
+        dlon = coords_rad[:, 0] - target_rad[0]
+
+        a = (np.sin(dlat / 2) ** 2 +
+             np.cos(target_rad[1]) * np.cos(coords_rad[:, 1]) * np.sin(dlon / 2) ** 2)
+        distances = 2 * np.arctan2(np.sqrt(a), np.sqrt(1 - a))
+
+        # 最小距離のインデックスを取得
+        nearest_idx = np.argmin(distances)
+        return nodes[nearest_idx]
     
     def _find_path_astar(
         self,

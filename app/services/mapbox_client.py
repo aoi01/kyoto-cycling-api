@@ -24,12 +24,15 @@ from app.models.route import VoiceInstruction
 # Mapbox API エンドポイント
 MAPBOX_API_BASE = "https://api.mapbox.com"
 
-# Map Matching API パス
+# Directions API パス（音声指示取得用）
+# 参照: https://docs.mapbox.com/api/navigation/directions/
+DIRECTIONS_PATH = "/directions/v5/mapbox"
+
+# Map Matching API パス（後方互換性のため残す）
 # 参照: https://docs.mapbox.com/api/navigation/map-matching/
 MAP_MATCHING_PATH = "/matching/v5/mapbox"
 
 # プロファイル（移動手段）
-# 参照: https://docs.mapbox.com/api/navigation/map-matching/#optional-parameters
 PROFILES = {
     "cycling": "cycling",
     "walking": "walking",
@@ -175,6 +178,15 @@ class MapboxClient:
         
         # クエリパラメータ
         # 参照: https://docs.mapbox.com/api/navigation/map-matching/#optional-parameters
+        #
+        # waypoints パラメータ:
+        # 座標リストの中で「実際の経由地点」のインデックスを指定する。
+        # これを指定しないと、すべての座標が waypoint として扱われ、
+        # 「○つ目の目的地に到着しました」という指示が大量に生成される。
+        # 始点(0)と終点(最後のインデックス)のみを指定することで、
+        # 中間座標はルート形状の参考としてのみ使用される。
+        waypoint_indices = f"0;{len(coordinates) - 1}"
+
         params = {
             "access_token": self._access_token,
             "geometries": "geojson",      # GeoJSON形式で返却
@@ -183,6 +195,7 @@ class MapboxClient:
             "voice_instructions": "true", # 音声指示を含める
             "language": "ja",             # 日本語
             "banner_instructions": "true", # バナー指示も含める
+            "waypoints": waypoint_indices, # 始点と終点のみをwaypointとして指定
         }
         
         # API呼び出し
@@ -263,13 +276,97 @@ class MapboxClient:
         return instructions
     
     # =========================================================================
+    # Directions API（推奨）
+    # =========================================================================
+
+    async def get_directions(
+        self,
+        origin: tuple[float, float],
+        destination: tuple[float, float],
+        waypoints: Optional[list[tuple[float, float]]] = None,
+        profile: str = "cycling",
+    ) -> tuple[list[VoiceInstruction], list[list[float]]]:
+        """
+        Directions APIで音声指示を取得
+
+        Map Matching APIとの違い:
+        - Directions API: 始点→終点のルートを計算し、音声指示を生成
+        - Map Matching API: 既存のGPSトレースを道路にスナップ
+
+        自前のグラフで安全ルートを計算済みなので、始点と終点（と主要経由地）
+        だけをMapboxに送り、音声指示を取得する。
+
+        参照: https://docs.mapbox.com/api/navigation/directions/
+
+        Args:
+            origin: 始点 (経度, 緯度)
+            destination: 終点 (経度, 緯度)
+            waypoints: 経由地リスト [(経度, 緯度), ...] 最大23点
+            profile: プロファイル ("cycling" / "walking" / "driving")
+
+        Returns:
+            tuple of:
+                - list[VoiceInstruction]: 音声指示リスト
+                - list[list[float]]: ルート座標リスト
+        """
+        # 座標を構築: origin + waypoints + destination
+        coords = [origin]
+        if waypoints:
+            # Directions APIは最大25座標（始点+終点含む）= 23経由地まで
+            coords.extend(waypoints[:23])
+        coords.append(destination)
+
+        # 座標を文字列に変換
+        coords_str = ";".join(f"{lon},{lat}" for lon, lat in coords)
+
+        # APIエンドポイント
+        profile_name = PROFILES.get(profile, "cycling")
+        url = f"{MAPBOX_API_BASE}{DIRECTIONS_PATH}/{profile_name}/{coords_str}"
+
+        # クエリパラメータ
+        params = {
+            "access_token": self._access_token,
+            "geometries": "geojson",
+            "overview": "full",
+            "steps": "true",
+            "voice_instructions": "true",
+            "language": "ja",
+            "banner_instructions": "true",
+        }
+
+        # API呼び出し
+        response = await self._client.get(url, params=params)
+        response.raise_for_status()
+
+        data = response.json()
+
+        # レスポンス確認
+        code = data.get("code")
+        if code != "Ok":
+            raise ValueError(f"Directions API failed: {code}")
+
+        routes = data.get("routes", [])
+        if not routes:
+            raise ValueError("No routes found")
+
+        route = routes[0]
+
+        # ジオメトリ抽出
+        geometry_coords = route.get("geometry", {}).get("coordinates", [])
+
+        # 音声指示抽出（Map Matchingと同じ構造）
+        voice_instructions = self._extract_voice_instructions(route)
+
+        return voice_instructions, geometry_coords
+
+    # =========================================================================
     # ユーティリティ
     # =========================================================================
-    
+
     async def validate_token(self) -> bool:
         """
         アクセストークンの有効性を確認
-        
+
         Returns:
             bool: トークンが有効かどうか
         """
@@ -278,7 +375,7 @@ class MapboxClient:
             test_coords = "135.7588,34.9858;135.7590,34.9860"
             url = f"{MAPBOX_API_BASE}{MAP_MATCHING_PATH}/cycling/{test_coords}"
             params = {"access_token": self._access_token}
-            
+
             response = await self._client.get(url, params=params)
             return response.status_code == 200
         except Exception:

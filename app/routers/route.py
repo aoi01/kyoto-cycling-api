@@ -266,9 +266,9 @@ async def _handle_direct_route(
         # ルート計算
         result = route_calculator.calculate_direct_route(origin, destination, safety)
 
-        # Map Matchingで音声指示取得
+        # Directions APIで音声指示取得
         voice_instructions, matched_coords = await _get_voice_instructions(
-            result.coordinates, mapbox_client
+            origin, destination, result.coordinates, mapbox_client
         )
 
         # セグメント作成
@@ -330,9 +330,10 @@ async def _handle_parking_route(
         parking = result['parking']
         bicycle_route = result['bicycle_route']
 
-        # Map Matching
+        # Directions APIで音声指示取得（origin → parking）
+        parking_coords = (parking.coordinates[0], parking.coordinates[1])
         voice_instructions, matched_coords = await _get_voice_instructions(
-            bicycle_route.coordinates, mapbox_client
+            origin, parking_coords, bicycle_route.coordinates, mapbox_client
         )
 
         # セグメント作成
@@ -437,9 +438,11 @@ async def _handle_share_cycle_route(
         return_port = result['return_port']
         bicycle_route = result['bicycle_route']
 
-        # Map Matching
+        # Directions APIで音声指示取得（borrow_port → return_port）
+        borrow_coords = (borrow_port.coordinates[0], borrow_port.coordinates[1])
+        return_coords = (return_port.coordinates[0], return_port.coordinates[1])
         voice_instructions, matched_coords = await _get_voice_instructions(
-            bicycle_route.coordinates, mapbox_client
+            borrow_coords, return_coords, bicycle_route.coordinates, mapbox_client
         )
 
         # セグメント作成
@@ -537,33 +540,44 @@ async def _handle_share_cycle_route(
 # =============================================================================
 
 async def _get_voice_instructions(
+    origin: tuple[float, float],
+    destination: tuple[float, float],
     coordinates: list[list[float]],
     mapbox_client: MapboxClient,
 ) -> tuple[list[VoiceInstruction], Optional[list[list[float]]]]:
     """
-    Mapbox Map Matchingで音声指示を取得
+    Mapbox Directions APIで音声指示を取得
+
+    従来のMap Matching APIではなくDirections APIを使用。
+    始点と終点のみを送信し、Mapboxにルート計算と音声指示生成を任せる。
+
+    これにより:
+    - 数千座標を送る必要がなくなる
+    - 「○つ目の目的地に到着しました」という不要な指示が出ない
+    - APIリクエストが軽量化される
 
     Args:
-        coordinates: 座標リスト [[経度, 緯度], ...]
+        origin: 始点 (経度, 緯度)
+        destination: 終点 (経度, 緯度)
+        coordinates: 自前グラフで計算したルート座標（参考用、経由地抽出に使用可能）
         mapbox_client: Mapboxクライアント
 
     Returns:
-        (音声指示リスト, マッチされた座標リスト)
+        (音声指示リスト, Mapboxが返したルート座標リスト)
     """
     try:
-        # 座標が多すぎる場合はダウンサンプリング
-        sample_coords = coordinates[::max(1, len(coordinates) // 50)]
-        if len(sample_coords) < 2:
-            sample_coords = coordinates[:2] if len(coordinates) >= 2 else coordinates
-
-        # Map Matching API呼び出し
-        geometry, instructions, distance, duration = await mapbox_client.map_match(
-            [(c[0], c[1]) for c in sample_coords],
+        # Directions APIを使用（始点と終点のみ）
+        # 注: 自前グラフの安全ルートとMapboxのルートは異なる可能性がある
+        # 音声指示はMapboxのルートに基づくが、地図表示は自前ルートを使用
+        instructions, mapbox_coords = await mapbox_client.get_directions(
+            origin=origin,
+            destination=destination,
+            waypoints=None,  # 経由地なし（始点→終点の直接ルート）
             profile="cycling"
         )
 
-        return instructions, geometry.coordinates
+        return instructions, mapbox_coords
 
     except Exception as e:
-        print(f"Map Matching failed: {e}")
+        print(f"Directions API failed: {e}")
         return [], None

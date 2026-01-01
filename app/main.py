@@ -15,6 +15,10 @@ import pickle
 from contextlib import asynccontextmanager
 from typing import Optional
 
+# .envファイルを読み込む（os.getenvより前に実行）
+from dotenv import load_dotenv
+load_dotenv()
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -219,6 +223,17 @@ app.include_router(ports_router)
 async def health_check():
     """ヘルスチェック（Cloud Run用）"""
     return {"status": "healthy"}
+
+
+@app.get("/debug/config", tags=["debug"])
+async def get_config():
+    """設定確認（デバッグ用）"""
+    token = settings.MAPBOX_ACCESS_TOKEN
+    return {
+        "mapbox_token_set": bool(token),
+        "mapbox_token_prefix": token[:20] + "..." if len(token) > 20 else "(empty)",
+        "graph_path": settings.GRAPH_PATH,
+    }
 
 
 @app.get("/debug/graph-info", tags=["debug"])

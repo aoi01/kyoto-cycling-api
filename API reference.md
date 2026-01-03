@@ -106,8 +106,8 @@ import pickle
 with open("app/data/graph/kyoto_bike_graph.pkl", "rb") as f:
     graph = pickle.load(f)
 
-print(f"Nodes: {len(graph.nodes):,}")  # 例: 45,000
-print(f"Edges: {len(graph.edges):,}")  # 例: 120,000
+print(f"Nodes: {len(graph.nodes):,}")  # 約67,700
+print(f"Edges: {len(graph.edges):,}")  # 約175,000
 ```
 
 #### is_safe判定基準
@@ -225,8 +225,19 @@ print(f"Edges: {len(graph.edges):,}")  # 例: 120,000
 | メソッド | 役割 |
 |---------|------|
 | `close()` | クライアントクローズ |
-| `map_match(coordinates, profile)` | Map Matching API |
+| `map_match(coordinates, profile)` | Map Matching API（座標を道路にスナップ＋音声指示取得） |
+| `get_directions(origin, destination, waypoints, profile)` | Directions API（始点・終点から音声指示取得） |
 | `validate_token()` | トークン検証 |
+
+#### map_match の waypoints パラメータ
+
+Map Matching APIでは、座標リストの中で「実際の経由地点」のインデックスを指定できる。
+始点(0)と終点(最後のインデックス)のみを指定することで、中間座標はルート形状の参考としてのみ使用され、
+「○つ目の目的地に到着しました」という不要な音声指示が出ない。
+
+```python
+# waypoints="0;{len(coordinates)-1}" で始点・終点のみを経由地として指定
+```
 
 ---
 
@@ -240,8 +251,28 @@ print(f"Edges: {len(graph.edges):,}")  # 例: 120,000
 | `destination` | string | ✓ | 目的地 "経度,緯度" |
 | `mode` | string | ✓ | "my-cycle" / "share-cycle" |
 | `safety` | int | ✓ | 1-10 |
-| `needParking` | bool | - | 駐輪場案内が必要か |
-| `operators` | string | - | 事業者（カンマ区切り） |
+| `needParking` | bool | - | 駐輪場案内が必要か（デフォルト: true） |
+| `operators` | string | - | 事業者（カンマ区切り、share-cycle時に使用） |
+
+#### route.py 内部ヘルパー関数
+
+| 関数 | 役割 |
+|------|------|
+| `_calculate_bearing(lon1, lat1, lon2, lat2)` | 2点間の方位角を計算（0-360度） |
+| `_angle_difference(bearing1, bearing2)` | 2つの方位角の差を計算（0-180度） |
+| `_extract_turn_points(coordinates, angle_threshold, max_waypoints)` | 曲がり角を抽出（未使用） |
+| `_filter_voice_instructions(instructions, min_distance_between)` | 音声指示をフィルタリング |
+| `_simplify_coordinates(coordinates, tolerance, max_count)` | Douglas-Peuckerで座標を簡略化 |
+| `_get_voice_instructions(origin, destination, coordinates, mapbox_client)` | Mapbox APIで音声指示を取得 |
+
+#### Douglas-Peucker座標簡略化
+
+ルート座標が多すぎる場合（Map Matching APIの上限100点）、Douglas-Peuckerアルゴリズムで簡略化する。
+
+```python
+# tolerance=0.0001 は約11m、形状を保ちながら座標数を削減
+# 例: 148点 → 28点（81%削減）
+```
 
 ### 5.2 ports.py - GET /api/ports
 
@@ -322,6 +353,7 @@ async def lifespan(app: FastAPI):
 ### 外部API
 - GBFS仕様: https://gbfs.org/documentation/reference/
 - Mapbox Map Matching: https://docs.mapbox.com/api/navigation/map-matching/
+- Mapbox Directions: https://docs.mapbox.com/api/navigation/directions/
 
 ### その他
 - httpx: https://www.python-httpx.org/async/

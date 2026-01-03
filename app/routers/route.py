@@ -539,6 +539,256 @@ async def _handle_share_cycle_route(
 # ヘルパー関数
 # =============================================================================
 
+import math
+
+
+def _calculate_bearing(lon1: float, lat1: float, lon2: float, lat2: float) -> float:
+    """
+    2点間の方位角（bearing）を計算（度数法、0-360）
+
+    北を0度として時計回りに角度を返す。
+
+    Args:
+        lon1, lat1: 始点の経度・緯度
+        lon2, lat2: 終点の経度・緯度
+
+    Returns:
+        方位角（0-360度）
+    """
+    # ラジアンに変換
+    lat1_rad = math.radians(lat1)
+    lat2_rad = math.radians(lat2)
+    delta_lon = math.radians(lon2 - lon1)
+
+    x = math.sin(delta_lon) * math.cos(lat2_rad)
+    y = (math.cos(lat1_rad) * math.sin(lat2_rad) -
+         math.sin(lat1_rad) * math.cos(lat2_rad) * math.cos(delta_lon))
+
+    bearing = math.degrees(math.atan2(x, y))
+    return (bearing + 360) % 360
+
+
+def _angle_difference(bearing1: float, bearing2: float) -> float:
+    """
+    2つの方位角の差を計算（0-180度）
+
+    Args:
+        bearing1, bearing2: 方位角（0-360度）
+
+    Returns:
+        角度差（0-180度）
+    """
+    diff = abs(bearing1 - bearing2)
+    return min(diff, 360 - diff)
+
+
+def _extract_turn_points(
+    coordinates: list[list[float]],
+    angle_threshold: float = 30.0,
+    max_waypoints: int = 23,
+) -> list[tuple[float, float]]:
+    """
+    ルート座標から曲がり角（ターンポイント）を抽出
+
+    連続する座標間の進行方向を計算し、大きく方向が変わる点を抽出する。
+    これにより、数百の座標から重要な経由地のみを取り出せる。
+
+    アルゴリズム:
+    1. 連続する3点 (A, B, C) を見る
+    2. A→Bの方位角と B→Cの方位角を計算
+    3. 角度差が閾値を超えたらBは曲がり角
+    4. 曲がり角が多すぎる場合、閾値を上げて再抽出
+
+    Args:
+        coordinates: ルート座標 [[経度, 緯度], ...]
+        angle_threshold: 曲がり角と判定する角度差の閾値（度）
+        max_waypoints: 最大経由地数（Mapbox APIの制限は23）
+
+    Returns:
+        曲がり角の座標リスト [(経度, 緯度), ...]
+    """
+    if len(coordinates) < 3:
+        return []
+
+    turn_points = []
+
+    for i in range(1, len(coordinates) - 1):
+        prev = coordinates[i - 1]
+        curr = coordinates[i]
+        next_ = coordinates[i + 1]
+
+        # 方位角を計算
+        bearing1 = _calculate_bearing(prev[0], prev[1], curr[0], curr[1])
+        bearing2 = _calculate_bearing(curr[0], curr[1], next_[0], next_[1])
+
+        # 角度差が閾値を超えたら曲がり角
+        angle_diff = _angle_difference(bearing1, bearing2)
+        if angle_diff >= angle_threshold:
+            turn_points.append((curr[0], curr[1], angle_diff))
+
+    # 曲がり角が多すぎる場合、角度差の大きい順にソートして上位を選択
+    if len(turn_points) > max_waypoints:
+        # 角度差でソート（大きい順）
+        turn_points.sort(key=lambda x: x[2], reverse=True)
+        turn_points = turn_points[:max_waypoints]
+        # 元のルート順に並び替え
+        turn_points_set = {(tp[0], tp[1]) for tp in turn_points}
+        turn_points = []
+        for coord in coordinates:
+            if (coord[0], coord[1]) in turn_points_set:
+                turn_points.append((coord[0], coord[1]))
+                if len(turn_points) >= max_waypoints:
+                    break
+    else:
+        turn_points = [(tp[0], tp[1]) for tp in turn_points]
+
+    return turn_points
+
+
+def _filter_voice_instructions(
+    instructions: list[VoiceInstruction],
+    min_distance_between: float = 50.0,
+) -> list[VoiceInstruction]:
+    """
+    音声指示をフィルタリング
+
+    Map Matching APIからの音声指示から不要なものを除去し、
+    実用的なナビゲーション指示のみを残す。
+
+    フィルタリング対象:
+    1. 「○つ目の目的地」→ すべて除去
+    2. 「目的地に到着しました」→ 最後のもののみ残す
+    3. 重複する指示 → 距離が近い（50m以内）ものを除去
+    4. 「その先」を含む複合指示 → 分割して最初の部分のみ
+
+    Args:
+        instructions: 元の音声指示リスト
+        min_distance_between: 指示間の最小距離（メートル）
+
+    Returns:
+        フィルタリング後の音声指示リスト
+    """
+    if not instructions:
+        return []
+
+    # キーワード定義
+    waypoint_keywords = ["つ目の目的地"]
+    arrival_keywords = ["目的地に到着", "まもなく目的地"]
+
+    # 到着指示とそれ以外を分離
+    arrival_instructions = []
+    other_instructions = []
+
+    for inst in instructions:
+        announcement = inst.announcement
+
+        # 「○つ目の目的地」は完全に除去
+        if any(kw in announcement for kw in waypoint_keywords):
+            continue
+
+        # 「その先」で分割し、最初の部分のみ使用
+        if "その先" in announcement:
+            parts = announcement.split("その先")
+            announcement = parts[0].strip().rstrip("。")
+            if not announcement:
+                continue
+            inst = VoiceInstruction(
+                distance_along_geometry=inst.distance_along_geometry,
+                announcement=announcement,
+            )
+
+        # 到着関連の指示を分離
+        if any(kw in announcement for kw in arrival_keywords):
+            arrival_instructions.append(inst)
+        else:
+            other_instructions.append(inst)
+
+    # 重複除去：距離が近い指示を統合
+    filtered = []
+    last_distance = -min_distance_between * 2  # 最初の指示は必ず含める
+
+    for inst in other_instructions:
+        if inst.distance_along_geometry - last_distance >= min_distance_between:
+            filtered.append(inst)
+            last_distance = inst.distance_along_geometry
+
+    # 最後の到着指示のみを残す
+    final_arrival = []
+    if arrival_instructions:
+        max_distance = max(inst.distance_along_geometry for inst in arrival_instructions)
+        # 最大距離の到着指示を1つだけ残す
+        for inst in arrival_instructions:
+            if inst.distance_along_geometry >= max_distance - 100:
+                final_arrival.append(inst)
+                break
+
+    # 結合して距離順にソート
+    result = filtered + final_arrival
+    result.sort(key=lambda x: x.distance_along_geometry)
+
+    return result
+
+
+def _simplify_coordinates(
+    coordinates: list[list[float]],
+    tolerance: float = 0.0001,
+    max_count: int = 100,
+) -> list[tuple[float, float]]:
+    """
+    Douglas-Peuckerアルゴリズムでルート座標を簡略化
+
+    shapely.LineString.simplify() を使用して、ルートの形状を保ちながら
+    座標点数を削減する。
+
+    Douglas-Peuckerアルゴリズム:
+    - 始点と終点を結ぶ直線から最も離れた点を見つける
+    - その距離がtolerance以下なら中間点を全て削除
+    - tolerance以上なら、その点で分割して再帰的に処理
+
+    Args:
+        coordinates: 座標リスト [[経度, 緯度], ...]
+        tolerance: 簡略化の許容誤差（度数）
+                   0.0001度 ≈ 約11m（緯度による）
+                   0.00005度 ≈ 約5m
+        max_count: 最大座標数（API制限用）
+
+    Returns:
+        簡略化された座標リスト [(経度, 緯度), ...]
+    """
+    from shapely.geometry import LineString
+
+    if len(coordinates) < 3:
+        return [(c[0], c[1]) for c in coordinates]
+
+    # LineStringを作成
+    line = LineString(coordinates)
+
+    # Douglas-Peuckerで簡略化
+    simplified = line.simplify(tolerance, preserve_topology=True)
+
+    # 座標を抽出
+    result = list(simplified.coords)
+
+    # まだ多すぎる場合は、toleranceを上げて再度簡略化
+    current_tolerance = tolerance
+    while len(result) > max_count and current_tolerance < 0.01:
+        current_tolerance *= 2
+        simplified = line.simplify(current_tolerance, preserve_topology=True)
+        result = list(simplified.coords)
+
+    # それでも多い場合は均等サンプリングにフォールバック
+    if len(result) > max_count:
+        step = (len(result) - 1) / (max_count - 1)
+        sampled = []
+        for i in range(max_count - 1):
+            idx = int(i * step)
+            sampled.append(result[idx])
+        sampled.append(result[-1])
+        result = sampled
+
+    return result
+
+
 async def _get_voice_instructions(
     origin: tuple[float, float],
     destination: tuple[float, float],
@@ -546,38 +796,52 @@ async def _get_voice_instructions(
     mapbox_client: MapboxClient,
 ) -> tuple[list[VoiceInstruction], Optional[list[list[float]]]]:
     """
-    Mapbox Directions APIで音声指示を取得
+    Mapbox Map Matching APIで音声指示を取得
 
-    従来のMap Matching APIではなくDirections APIを使用。
-    始点と終点のみを送信し、Mapboxにルート計算と音声指示生成を任せる。
+    自前グラフで計算したルート座標をダウンサンプリングして
+    Map Matching APIに送信する。
 
-    これにより:
-    - 数千座標を送る必要がなくなる
-    - 「○つ目の目的地に到着しました」という不要な指示が出ない
-    - APIリクエストが軽量化される
+    Map Matching APIのwaypointsパラメータで始点・終点のみを指定することで、
+    中間座標はルート形状の参考としてのみ使用され、
+    「○つ目の目的地に到着しました」という不要な指示が出ない。
+
+    処理フロー:
+    1. ルート座標をダウンサンプリング（最大100点）
+    2. Map Matching APIに送信（waypoints=始点・終点のみ）
+    3. 音声指示から中間到着指示をフィルタリング
 
     Args:
         origin: 始点 (経度, 緯度)
         destination: 終点 (経度, 緯度)
-        coordinates: 自前グラフで計算したルート座標（参考用、経由地抽出に使用可能）
+        coordinates: 自前グラフで計算したルート座標
         mapbox_client: Mapboxクライアント
 
     Returns:
         (音声指示リスト, Mapboxが返したルート座標リスト)
     """
     try:
-        # Directions APIを使用（始点と終点のみ）
-        # 注: 自前グラフの安全ルートとMapboxのルートは異なる可能性がある
-        # 音声指示はMapboxのルートに基づくが、地図表示は自前ルートを使用
-        instructions, mapbox_coords = await mapbox_client.get_directions(
-            origin=origin,
-            destination=destination,
-            waypoints=None,  # 経由地なし（始点→終点の直接ルート）
+        # Douglas-Peuckerで座標を簡略化
+        simplified_coords = _simplify_coordinates(
+            coordinates,
+            tolerance=0.0001,  # 約11m
+            max_count=100,     # Map Matching API制限
+        )
+
+        print(f"Coordinates: {len(coordinates)} -> {len(simplified_coords)} (simplified)")
+
+        # Map Matching APIを使用
+        # waypointsパラメータは mapbox_client.map_match 内部で
+        # 始点・終点のみに設定される
+        geometry, instructions, distance, duration = await mapbox_client.map_match(
+            coordinates=simplified_coords,
             profile="cycling"
         )
 
-        return instructions, mapbox_coords
+        # 中間到着指示をフィルタリング
+        filtered_instructions = _filter_voice_instructions(instructions)
+
+        return filtered_instructions, geometry.coordinates
 
     except Exception as e:
-        print(f"Directions API failed: {e}")
+        print(f"Map Matching API failed: {e}")
         return [], None

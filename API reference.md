@@ -359,6 +359,7 @@ async def lifespan(app: FastAPI):
 - httpx: https://www.python-httpx.org/async/
 - Haversine: https://pypi.org/project/haversine/
 - OSMnx: https://osmnx.readthedocs.io/
+- Shapely (Douglas-Peucker): https://shapely.readthedocs.io/en/stable/reference/shapely.simplify.html
 
 ---
 
@@ -396,7 +397,27 @@ else:
 
 ---
 
-## 付録C: データフロー図
+## 付録C: シェアサイクルルート計算
+
+`calculate_share_cycle_route()` の戻り値:
+
+| キー | 型 | 説明 |
+|------|-----|------|
+| `borrow_port` | Port | レンタルポート（自転車を借りる場所） |
+| `return_port` | Port | 返却ポート（自転車を返す場所） |
+| `walk_to_port` | float | 出発地→レンタルポートの徒歩距離(m) |
+| `bicycle_route` | RouteResult | レンタルポート→返却ポートの自転車ルート |
+| `walk_from_port` | float | 返却ポート→目的地の徒歩距離(m) |
+| `total_distance` | float | 総距離(m) |
+| `total_duration` | float | 総所要時間(秒) |
+
+ポート選択ロジック:
+- `borrow_port`: 出発地から最寄りの空き自転車があるポート
+- `return_port`: 目的地から最寄りの空きドックがあるポート
+
+---
+
+## 付録D: データフロー図
 
 ```
 ┌─────────────────────────────────────────────────────────────┐

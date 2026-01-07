@@ -54,26 +54,75 @@ class RouteResult:
 class WeightCalculator:
     """
     エッジ重み計算クラス
-    
+
     安全度パラメータ（1-10）に基づいて、エッジの重みを計算。
-    
-    係数:
-        safe_factor = 1.0 - (safety * 0.03)  # 0.97 ~ 0.70
-        normal_factor = 1.0 + (safety * 0.2)  # 1.2 ~ 3.0
+    is_safe=True の道を積極的に提案するため、大きな差をつける。
+    また、細い道を避けて主要道路を優先（曲がり角削減）。
+
+    係数（強化版）:
+        safe_factor = 1.0 - (safety * 0.08)   # 0.92 ~ 0.20（安全道を大幅優遇）
+        normal_factor = 1.0 + (safety * 0.5)  # 1.5 ~ 6.0（通常道に強いペナルティ）
+
+    道路種別ペナルティ:
+        - tertiary以上（三次道路以上）: 0.8（優遇）
+        - residential/service: 1.2（ペナルティ）
+        - path/track: 1.5（強いペナルティ）
     """
-    
+
+    # 道路種別ペナルティ（主要道路を優先、細い道を避ける）
+    HIGHWAY_PENALTY = {
+        # 主要道路（優遇）
+        'trunk': 0.7,
+        'trunk_link': 0.7,
+        'primary': 0.75,
+        'primary_link': 0.75,
+        'secondary': 0.8,
+        'secondary_link': 0.8,
+        'tertiary': 0.85,
+        'tertiary_link': 0.85,
+        # 自転車専用道（最優遇）
+        'cycleway': 0.6,
+        # 中間
+        'unclassified': 1.0,
+        # 住宅街・細い道（ペナルティ）
+        'residential': 1.15,
+        'service': 1.2,
+        'living_street': 1.1,
+        # 遊歩道・未舗装（強いペナルティ）
+        'path': 1.4,
+        'track': 1.5,
+        'pedestrian': 1.3,
+        'busway': 1.5,
+    }
+
     @staticmethod
     def get_factors(safety: int) -> tuple[float, float]:
-        """安全度に応じた係数を計算"""
-        safe_factor = 1.0 - (safety * 0.03)
-        normal_factor = 1.0 + (safety * 0.2)
+        """安全度に応じた係数を計算（強化版）"""
+        # 安全道: safety=10で0.2（5倍速く通れる感覚）
+        safe_factor = max(0.2, 1.0 - (safety * 0.08))
+        # 通常道: safety=10で6.0（6倍遠回りしてでも避ける）
+        normal_factor = 1.0 + (safety * 0.5)
         return safe_factor, normal_factor
-    
+
     @staticmethod
-    def calculate_weight(length: float, is_safe: bool, safety: int) -> float:
-        """エッジの重みを計算"""
+    def get_highway_penalty(highway: str) -> float:
+        """道路種別に応じたペナルティを取得"""
+        if isinstance(highway, list):
+            highway = highway[0] if highway else 'unclassified'
+        return WeightCalculator.HIGHWAY_PENALTY.get(highway, 1.0)
+
+    @staticmethod
+    def calculate_weight(length: float, is_safe: bool, safety: int, highway: str = None) -> float:
+        """エッジの重みを計算（道路種別考慮）"""
         safe_factor, normal_factor = WeightCalculator.get_factors(safety)
-        return length * safe_factor if is_safe else length * normal_factor
+        base_cost = length * safe_factor if is_safe else length * normal_factor
+
+        # 道路種別ペナルティを適用
+        if highway:
+            highway_penalty = WeightCalculator.get_highway_penalty(highway)
+            return base_cost * highway_penalty
+
+        return base_cost
 
 
 # =============================================================================
@@ -195,32 +244,47 @@ class RouteCalculator:
         print(f"  - Parkings: {len(self.parkings)}")
     
     def _precompute_edge_costs(self):
-        """代表的なsafetyレベルの重みを事前計算"""
+        """代表的なsafetyレベルの重みを事前計算（道路種別考慮）"""
         print("Precomputing edge costs...")
         for safety in self.PRECOMPUTED_LEVELS:
             attr_name = f'cost_{safety}'
             safe_factor, normal_factor = WeightCalculator.get_factors(safety)
-            
+
             for u, v, k, data in self.graph.edges(keys=True, data=True):
                 length = data.get('length', 10)
                 is_safe = data.get('is_safe', False)
-                cost = length * safe_factor if is_safe else length * normal_factor
+                highway = data.get('highway', 'unclassified')
+
+                # 基本コスト
+                base_cost = length * safe_factor if is_safe else length * normal_factor
+
+                # 道路種別ペナルティを適用
+                highway_penalty = WeightCalculator.get_highway_penalty(highway)
+                cost = base_cost * highway_penalty
+
                 self.graph[u][v][k][attr_name] = cost
-        
+
         print(f"  -> Precomputed {len(self.PRECOMPUTED_LEVELS)} levels")
     
     def _get_weight(self, safety: int) -> Union[str, Callable]:
         """safetyに応じた重みを取得"""
         if safety in self.PRECOMPUTED_LEVELS:
             return f'cost_{safety}'
-        
+
         safe_factor, normal_factor = WeightCalculator.get_factors(safety)
-        
+
         def weight_func(u: int, v: int, data: dict) -> float:
             length = data.get('length', 10)
             is_safe = data.get('is_safe', False)
-            return length * safe_factor if is_safe else length * normal_factor
-        
+            highway = data.get('highway', 'unclassified')
+
+            # 基本コスト
+            base_cost = length * safe_factor if is_safe else length * normal_factor
+
+            # 道路種別ペナルティを適用
+            highway_penalty = WeightCalculator.get_highway_penalty(highway)
+            return base_cost * highway_penalty
+
         return weight_func
     
     def _find_nearest_node(self, lon: float, lat: float, graph: nx.MultiDiGraph = None) -> int:

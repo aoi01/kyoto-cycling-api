@@ -130,10 +130,18 @@ interface RoutePoint {
   feeDescription?: string;  // 駐輪場の料金説明
 }
 
-// 音声ナビゲーション指示
+// 音声ナビゲーション指示（自前生成）
+// バックエンドでルート座標から曲がり角を検出し、日本語案内を生成
+// 外部API（Mapbox Directions API）は使用しない
 interface VoiceInstruction {
   distanceAlongGeometry: number;  // ルート開始点からの距離（メートル）
   announcement: string;           // 音声案内テキスト
+  // 案内テキスト例:
+  // - "次の交差点を右折してください"
+  // - "次の交差点を左折してください"
+  // - "50メートル先を右折"
+  // - "Uターンしてください"
+  // - "目的地に到着しました"
 }
 
 // ルートジオメトリ
@@ -377,46 +385,514 @@ async function geocode(query: string): Promise<[number, number] | null> {
 
 ## 7. 音声ナビゲーション（VoiceNavigation）
 
-### 7.1 位置追跡による音声案内
+### 7.0 音声案内の生成方式
 
-ユーザーの現在位置を追跡し、`distanceAlongGeometry` に近づいたら該当する音声指示を再生/表示:
+**バックエンド自前実装**（Mapbox Directions APIは使用しない）:
+
+- **曲がり角検出**: ルート座標から30度以上の角度変化を検出
+- **方向判定**: 左折/右折/Uターンを自動判定
+- **案内タイミング**: 曲がり角の50m手前から案内開始
+- **シンプルな日本語**: 道路名は使用せず、「次の交差点を右折」形式
+
+### 7.1 アーキテクチャ
+
+リアルタイム音声案内は**フロントエンドで実装**する。
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    バックエンド                          │
+│  ┌─────────────────────────────────────────────────┐   │
+│  │ RouteCalculator + VoiceInstructionGenerator     │   │
+│  │  → ルート計算時に音声案内を一括生成              │   │
+│  └─────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────┘
+                          │
+                          │ voiceInstructions[] を返却
+                          ▼
+┌─────────────────────────────────────────────────────────┐
+│                   フロントエンド                         │
+│  ┌─────────────────┐    ┌─────────────────────────┐    │
+│  │ Mapbox/GPS      │    │ useVoiceNavigation      │    │
+│  │ 現在地取得       │ → │ ・ルート上距離計算        │    │
+│  └─────────────────┘    │ ・案内タイミング判定      │    │
+│                         │ ・Web Speech API再生     │    │
+│                         └─────────────────────────┘    │
+└─────────────────────────────────────────────────────────┘
+```
+
+**フロントエンド実装の理由:**
+- 現在地取得はクライアント側でのみ可能（GPS/Geolocation API）
+- リアルタイム性が必要（バックエンド往復の遅延は自転車移動に不適）
+- バックエンドAPIは「ルート計算時に音声案内を一括返却」する設計
+
+### 7.2 必要な追加パッケージ
+
+```bash
+npm install @turf/turf
+npm install -D @types/geojson
+```
+
+### 7.3 リアルタイム音声ナビゲーションフック
 
 ```typescript
-// hooks/useGeolocation.ts
-function useGeolocation() {
-  const [position, setPosition] = useState<[number, number] | null>(null);
+// hooks/useVoiceNavigation.ts
+import { useState, useEffect, useRef, useCallback } from 'react';
+import * as turf from '@turf/turf';
+import type { VoiceInstruction } from '@/types/api';
+import type { LineString } from 'geojson';
 
-  useEffect(() => {
-    const watchId = navigator.geolocation.watchPosition(
-      (pos) => setPosition([pos.coords.longitude, pos.coords.latitude]),
-      (error) => console.error(error),
-      { enableHighAccuracy: true, maximumAge: 1000 }
-    );
-    return () => navigator.geolocation.clearWatch(watchId);
+interface UseVoiceNavigationOptions {
+  voiceInstructions: VoiceInstruction[];
+  routeGeometry: LineString;
+  enabled?: boolean;
+  announceDistance?: number;  // 何m手前から案内するか（デフォルト: 50m）
+}
+
+interface VoiceNavigationState {
+  currentInstruction: VoiceInstruction | null;
+  nextInstruction: VoiceInstruction | null;
+  distanceToNext: number | null;
+  isNavigating: boolean;
+  isSpeaking: boolean;
+}
+
+export function useVoiceNavigation({
+  voiceInstructions,
+  routeGeometry,
+  enabled = true,
+  announceDistance = 50,
+}: UseVoiceNavigationOptions) {
+  const [state, setState] = useState<VoiceNavigationState>({
+    currentInstruction: null,
+    nextInstruction: null,
+    distanceToNext: null,
+    isNavigating: false,
+    isSpeaking: false,
+  });
+
+  // 既に案内済みのインデックスを追跡
+  const announcedIndices = useRef<Set<number>>(new Set());
+  const userPosition = useRef<[number, number] | null>(null);
+  const watchId = useRef<number | null>(null);
+
+  // ルート上の距離を計算
+  const calculateDistanceAlongRoute = useCallback(
+    (position: [number, number]): number => {
+      const line = turf.lineString(routeGeometry.coordinates);
+      const point = turf.point(position);
+
+      // ルート上の最寄り点を取得
+      const snapped = turf.nearestPointOnLine(line, point);
+
+      // ルート開始点からの距離（メートル）
+      // turf.jsはキロメートルで返すので1000倍
+      return (snapped.properties.location ?? 0) * 1000;
+    },
+    [routeGeometry]
+  );
+
+  // 音声再生
+  const speakAnnouncement = useCallback((text: string) => {
+    if (!('speechSynthesis' in window)) {
+      console.warn('Web Speech API is not supported');
+      return;
+    }
+
+    // 既存の音声をキャンセル
+    speechSynthesis.cancel();
+
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = 'ja-JP';
+    utterance.rate = 1.0;   // 速度（0.1-10）
+    utterance.pitch = 1.0;  // 音程（0-2）
+    utterance.volume = 1.0; // 音量（0-1）
+
+    utterance.onstart = () => {
+      setState(prev => ({ ...prev, isSpeaking: true }));
+    };
+
+    utterance.onend = () => {
+      setState(prev => ({ ...prev, isSpeaking: false }));
+    };
+
+    utterance.onerror = (event) => {
+      console.error('Speech synthesis error:', event.error);
+      setState(prev => ({ ...prev, isSpeaking: false }));
+    };
+
+    speechSynthesis.speak(utterance);
   }, []);
 
-  return position;
+  // 位置更新時の処理
+  const handlePositionUpdate = useCallback(
+    (position: GeolocationPosition) => {
+      const coords: [number, number] = [
+        position.coords.longitude,
+        position.coords.latitude,
+      ];
+      userPosition.current = coords;
+
+      if (!enabled || voiceInstructions.length === 0) return;
+
+      // 現在位置からルート上の距離を計算
+      const distanceAlongRoute = calculateDistanceAlongRoute(coords);
+
+      // 次の案内を特定（まだ案内していないもの）
+      let nextIndex = -1;
+      let nextInstruction: VoiceInstruction | null = null;
+
+      for (let i = 0; i < voiceInstructions.length; i++) {
+        const inst = voiceInstructions[i];
+        if (!announcedIndices.current.has(i)) {
+          // 案内開始距離に到達したかチェック
+          const triggerDistance = inst.distanceAlongGeometry - announceDistance;
+          if (distanceAlongRoute >= triggerDistance) {
+            nextIndex = i;
+            nextInstruction = inst;
+            break;
+          }
+          // まだ到達していない次の案内
+          if (nextInstruction === null) {
+            nextInstruction = inst;
+          }
+          break;
+        }
+      }
+
+      // 案内を再生
+      if (nextIndex !== -1 && nextInstruction) {
+        speakAnnouncement(nextInstruction.announcement);
+        announcedIndices.current.add(nextIndex);
+      }
+
+      // 次の案内までの距離を計算
+      const upcomingInstruction = voiceInstructions.find(
+        (inst, i) => !announcedIndices.current.has(i)
+      );
+      const distanceToNext = upcomingInstruction
+        ? upcomingInstruction.distanceAlongGeometry - distanceAlongRoute
+        : null;
+
+      setState(prev => ({
+        ...prev,
+        currentInstruction: nextIndex !== -1 ? nextInstruction : prev.currentInstruction,
+        nextInstruction: upcomingInstruction ?? null,
+        distanceToNext,
+      }));
+    },
+    [enabled, voiceInstructions, calculateDistanceAlongRoute, announceDistance, speakAnnouncement]
+  );
+
+  // ナビゲーション開始
+  const startNavigation = useCallback(() => {
+    if (!('geolocation' in navigator)) {
+      console.error('Geolocation is not supported');
+      return;
+    }
+
+    // リセット
+    announcedIndices.current.clear();
+
+    watchId.current = navigator.geolocation.watchPosition(
+      handlePositionUpdate,
+      (error) => {
+        console.error('Geolocation error:', error);
+      },
+      {
+        enableHighAccuracy: true,
+        maximumAge: 1000,      // 1秒間キャッシュ
+        timeout: 10000,        // 10秒タイムアウト
+      }
+    );
+
+    setState(prev => ({ ...prev, isNavigating: true }));
+  }, [handlePositionUpdate]);
+
+  // ナビゲーション停止
+  const stopNavigation = useCallback(() => {
+    if (watchId.current !== null) {
+      navigator.geolocation.clearWatch(watchId.current);
+      watchId.current = null;
+    }
+    speechSynthesis.cancel();
+    setState({
+      currentInstruction: null,
+      nextInstruction: null,
+      distanceToNext: null,
+      isNavigating: false,
+      isSpeaking: false,
+    });
+  }, []);
+
+  // 特定の案内を手動で再生
+  const replayInstruction = useCallback((instruction: VoiceInstruction) => {
+    speakAnnouncement(instruction.announcement);
+  }, [speakAnnouncement]);
+
+  // クリーンアップ
+  useEffect(() => {
+    return () => {
+      if (watchId.current !== null) {
+        navigator.geolocation.clearWatch(watchId.current);
+      }
+      speechSynthesis.cancel();
+    };
+  }, []);
+
+  return {
+    ...state,
+    startNavigation,
+    stopNavigation,
+    replayInstruction,
+    userPosition: userPosition.current,
+  };
 }
 ```
 
-### 7.2 音声指示の表示ロジック
+### 7.4 ルート上距離計算ユーティリティ
 
 ```typescript
-// 現在位置からルート上の距離を計算
-const currentDistance = calculateDistanceAlongRoute(userLocation, routeGeometry);
+// utils/route-distance.ts
+import * as turf from '@turf/turf';
+import type { LineString, Position } from 'geojson';
 
-// 次の指示を特定
-const nextInstruction = voiceInstructions.find(
-  inst => inst.distanceAlongGeometry > currentDistance - 50  // 50m手前から表示
-);
+/**
+ * ユーザー位置からルート上の最寄り点までの距離（メートル）
+ * ルートから外れている場合に使用
+ */
+export function distanceToRoute(
+  userPosition: [number, number],
+  routeGeometry: LineString
+): number {
+  const line = turf.lineString(routeGeometry.coordinates);
+  const point = turf.point(userPosition);
+  const snapped = turf.nearestPointOnLine(line, point);
 
-// 音声再生（Web Speech API）
-if (nextInstruction && shouldAnnounce(nextInstruction)) {
-  const utterance = new SpeechSynthesisUtterance(nextInstruction.announcement);
-  utterance.lang = 'ja-JP';
-  speechSynthesis.speak(utterance);
+  // ユーザー位置から最寄り点までの距離（メートル）
+  return turf.distance(point, snapped, { units: 'meters' });
+}
+
+/**
+ * ユーザーがルートから外れているかチェック
+ * @param threshold 許容距離（メートル）、デフォルト50m
+ */
+export function isOffRoute(
+  userPosition: [number, number],
+  routeGeometry: LineString,
+  threshold: number = 50
+): boolean {
+  return distanceToRoute(userPosition, routeGeometry) > threshold;
+}
+
+/**
+ * ルート開始点からユーザー位置までの距離（メートル）
+ */
+export function distanceAlongRoute(
+  userPosition: [number, number],
+  routeGeometry: LineString
+): number {
+  const line = turf.lineString(routeGeometry.coordinates);
+  const point = turf.point(userPosition);
+  const snapped = turf.nearestPointOnLine(line, point);
+
+  return (snapped.properties.location ?? 0) * 1000;
+}
+
+/**
+ * 残り距離を計算
+ */
+export function remainingDistance(
+  userPosition: [number, number],
+  routeGeometry: LineString,
+  totalDistance: number
+): number {
+  const traveled = distanceAlongRoute(userPosition, routeGeometry);
+  return Math.max(0, totalDistance - traveled);
 }
 ```
+
+### 7.5 音声ナビゲーションUIコンポーネント
+
+```tsx
+// components/features/navigation/VoiceNavigation.tsx
+import { useVoiceNavigation } from '@/hooks/useVoiceNavigation';
+import { Button } from '@/components/ui/button';
+import { Volume2, VolumeX, Navigation, Square } from 'lucide-react';
+import type { VoiceInstruction } from '@/types/api';
+import type { LineString } from 'geojson';
+
+interface VoiceNavigationProps {
+  voiceInstructions: VoiceInstruction[];
+  routeGeometry: LineString;
+}
+
+export function VoiceNavigation({
+  voiceInstructions,
+  routeGeometry
+}: VoiceNavigationProps) {
+  const {
+    currentInstruction,
+    nextInstruction,
+    distanceToNext,
+    isNavigating,
+    isSpeaking,
+    startNavigation,
+    stopNavigation,
+    replayInstruction,
+  } = useVoiceNavigation({
+    voiceInstructions,
+    routeGeometry,
+  });
+
+  // 距離のフォーマット
+  const formatDistance = (meters: number | null): string => {
+    if (meters === null) return '';
+    if (meters < 1000) return `${Math.round(meters)}m`;
+    return `${(meters / 1000).toFixed(1)}km`;
+  };
+
+  return (
+    <div className="bg-white rounded-lg shadow-lg p-4">
+      {/* ナビゲーション制御 */}
+      <div className="flex gap-2 mb-4">
+        {!isNavigating ? (
+          <Button onClick={startNavigation} className="flex-1">
+            <Navigation className="w-4 h-4 mr-2" />
+            ナビ開始
+          </Button>
+        ) : (
+          <Button onClick={stopNavigation} variant="destructive" className="flex-1">
+            <Square className="w-4 h-4 mr-2" />
+            ナビ終了
+          </Button>
+        )}
+      </div>
+
+      {/* 現在の案内 */}
+      {isNavigating && nextInstruction && (
+        <div className="space-y-3">
+          {/* 次の案内 */}
+          <div className="bg-blue-50 rounded-lg p-4">
+            <div className="flex items-center justify-between">
+              <div className="flex-1">
+                <p className="text-sm text-blue-600 mb-1">次の案内</p>
+                <p className="text-lg font-bold text-blue-900">
+                  {nextInstruction.announcement}
+                </p>
+                {distanceToNext !== null && (
+                  <p className="text-sm text-blue-700 mt-1">
+                    あと {formatDistance(distanceToNext)}
+                  </p>
+                )}
+              </div>
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => replayInstruction(nextInstruction)}
+                disabled={isSpeaking}
+              >
+                {isSpeaking ? (
+                  <VolumeX className="w-5 h-5" />
+                ) : (
+                  <Volume2 className="w-5 h-5" />
+                )}
+              </Button>
+            </div>
+          </div>
+
+          {/* 直前の案内（参考表示） */}
+          {currentInstruction && currentInstruction !== nextInstruction && (
+            <div className="bg-gray-50 rounded-lg p-3">
+              <p className="text-xs text-gray-500 mb-1">前回の案内</p>
+              <p className="text-sm text-gray-700">
+                {currentInstruction.announcement}
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ナビゲーション未開始時 */}
+      {!isNavigating && (
+        <p className="text-sm text-gray-500 text-center">
+          ナビを開始すると、曲がり角に近づいた時に<br />
+          音声で案内します
+        </p>
+      )}
+    </div>
+  );
+}
+```
+
+### 7.6 ルート逸脱検知
+
+```typescript
+// hooks/useRouteDeviation.ts
+import { useState, useEffect, useRef } from 'react';
+import { isOffRoute, distanceToRoute } from '@/utils/route-distance';
+import type { LineString } from 'geojson';
+
+interface UseRouteDeviationOptions {
+  routeGeometry: LineString;
+  threshold?: number;  // 逸脱判定距離（メートル）
+  onDeviation?: () => void;  // 逸脱時コールバック
+}
+
+export function useRouteDeviation({
+  routeGeometry,
+  threshold = 50,
+  onDeviation,
+}: UseRouteDeviationOptions) {
+  const [isDeviated, setIsDeviated] = useState(false);
+  const [deviationDistance, setDeviationDistance] = useState<number>(0);
+  const watchId = useRef<number | null>(null);
+
+  useEffect(() => {
+    watchId.current = navigator.geolocation.watchPosition(
+      (position) => {
+        const userPos: [number, number] = [
+          position.coords.longitude,
+          position.coords.latitude,
+        ];
+
+        const distance = distanceToRoute(userPos, routeGeometry);
+        const deviated = distance > threshold;
+
+        setDeviationDistance(distance);
+        setIsDeviated(deviated);
+
+        if (deviated && onDeviation) {
+          onDeviation();
+        }
+      },
+      (error) => console.error('Geolocation error:', error),
+      { enableHighAccuracy: true, maximumAge: 2000 }
+    );
+
+    return () => {
+      if (watchId.current !== null) {
+        navigator.geolocation.clearWatch(watchId.current);
+      }
+    };
+  }, [routeGeometry, threshold, onDeviation]);
+
+  return { isDeviated, deviationDistance };
+}
+```
+
+### 7.7 Web Speech API対応状況
+
+| ブラウザ | 対応状況 |
+|----------|----------|
+| Chrome (デスクトップ/Android) | ✅ 完全対応 |
+| Safari (iOS/macOS) | ✅ 完全対応 |
+| Firefox | ✅ 対応（一部制限あり） |
+| Edge | ✅ 完全対応 |
+
+**注意点:**
+- iOS Safariでは、ユーザー操作（タップ）後にのみ音声再生可能
+- バックグラウンドでは音声が停止する場合がある
+- 音声の種類はOSにインストールされている音声に依存
 
 ---
 
@@ -501,7 +977,7 @@ const fetchPorts = async (userLocation: [number, number]) => {
 | `NO_ROUTE_FOUND` | ルートが見つからない | "ルートが見つかりませんでした" |
 | `NO_PARKING_FOUND` | 駐輪場が見つからない | "目的地周辺に駐輪場がありません" |
 | `NO_PORT_AVAILABLE` | 利用可能なポートがない | "空き自転車のあるポートが見つかりません" |
-| `MAPBOX_API_ERROR` | Mapbox APIエラー | "地図サービスに接続できません" |
+| `MAPBOX_API_ERROR` | Mapbox Geocoding APIエラー | "住所検索サービスに接続できません" |
 | `GBFS_API_ERROR` | GBFS APIエラー | "シェアサイクル情報を取得できません" |
 
 ### 10.2 トースト通知

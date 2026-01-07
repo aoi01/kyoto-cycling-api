@@ -24,7 +24,6 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.services.route_calculator import RouteCalculator
 from app.services.gbfs_client import GBFSClient
-from app.services.mapbox_client import MapboxClient
 from app.models.parking import Parking
 from app.routers.route import router as route_router
 from app.routers.ports import router as ports_router
@@ -124,7 +123,6 @@ async def lifespan(app: FastAPI):
     2. 駐輪場データをロード
     3. RouteCalculator初期化（事前計算含む）
     4. GBFSClient初期化
-    5. MapboxClient初期化
 
     Shutdown:
     1. クライアントのクローズ
@@ -156,11 +154,6 @@ async def lifespan(app: FastAPI):
     await gbfs_client.initialize()
     app.state.gbfs_client = gbfs_client
 
-    # 5. MapboxClient初期化
-    print("Initializing MapboxClient...")
-    mapbox_client = MapboxClient(settings.MAPBOX_ACCESS_TOKEN)
-    app.state.mapbox_client = mapbox_client
-
     print("="*60)
     print("API Ready!")
     print("="*60)
@@ -172,7 +165,6 @@ async def lifespan(app: FastAPI):
 
     # クライアントのクローズ
     await gbfs_client.close()
-    await mapbox_client.close()
 
     print("Shutdown complete.")
 
@@ -198,7 +190,7 @@ app = FastAPI(
 - `safety=10`: 安全最優先
     """,
     version="1.0.0",
-    lifespan=lifespan
+    lifespan=lifespan,
 )
 
 # CORS設定

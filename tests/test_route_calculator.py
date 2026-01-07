@@ -46,43 +46,59 @@ class TestHaversineDistance:
 
 
 class TestWeightCalculator:
-    """重み計算のテスト"""
+    """重み計算のテスト（強化版係数）"""
 
     def test_safety_1_factors(self):
-        """safety=1の係数"""
+        """safety=1の係数（強化版）"""
         safe_factor, normal_factor = WeightCalculator.get_factors(1)
-        # safe_factor = 1.0 - 1*0.03 = 0.97
-        assert abs(safe_factor - 0.97) < 0.001
-        # normal_factor = 1.0 + 1*0.2 = 1.2
-        assert abs(normal_factor - 1.2) < 0.001
+        # safe_factor = 1.0 - 1*0.08 = 0.92
+        assert abs(safe_factor - 0.92) < 0.001
+        # normal_factor = 1.0 + 1*0.5 = 1.5
+        assert abs(normal_factor - 1.5) < 0.001
 
     def test_safety_5_factors(self):
-        """safety=5の係数"""
+        """safety=5の係数（強化版）"""
         safe_factor, normal_factor = WeightCalculator.get_factors(5)
-        # safe_factor = 1.0 - 5*0.03 = 0.85
-        assert abs(safe_factor - 0.85) < 0.001
-        # normal_factor = 1.0 + 5*0.2 = 2.0
-        assert abs(normal_factor - 2.0) < 0.001
+        # safe_factor = 1.0 - 5*0.08 = 0.60
+        assert abs(safe_factor - 0.60) < 0.001
+        # normal_factor = 1.0 + 5*0.5 = 3.5
+        assert abs(normal_factor - 3.5) < 0.001
 
     def test_safety_10_factors(self):
-        """safety=10の係数"""
+        """safety=10の係数（強化版）"""
         safe_factor, normal_factor = WeightCalculator.get_factors(10)
-        # safe_factor = 1.0 - 10*0.03 = 0.70
-        assert abs(safe_factor - 0.70) < 0.001
-        # normal_factor = 1.0 + 10*0.2 = 3.0
-        assert abs(normal_factor - 3.0) < 0.001
+        # safe_factor = max(0.2, 1.0 - 10*0.08) = 0.20
+        assert abs(safe_factor - 0.20) < 0.001
+        # normal_factor = 1.0 + 10*0.5 = 6.0
+        assert abs(normal_factor - 6.0) < 0.001
 
     def test_calculate_weight_safe_road(self):
-        """安全道の重み計算"""
+        """安全道の重み計算（道路種別なし）"""
         weight = WeightCalculator.calculate_weight(100, is_safe=True, safety=5)
-        # 100 * 0.85 = 85
-        assert abs(weight - 85) < 0.1
+        # 100 * 0.60 = 60（道路種別ペナルティなし）
+        assert abs(weight - 60) < 0.1
 
     def test_calculate_weight_normal_road(self):
-        """通常道の重み計算"""
+        """通常道の重み計算（道路種別なし）"""
         weight = WeightCalculator.calculate_weight(100, is_safe=False, safety=5)
-        # 100 * 2.0 = 200
-        assert abs(weight - 200) < 0.1
+        # 100 * 3.5 = 350（道路種別ペナルティなし）
+        assert abs(weight - 350) < 0.1
+
+    def test_highway_penalty_residential(self):
+        """住宅街道路のペナルティ"""
+        penalty = WeightCalculator.get_highway_penalty('residential')
+        assert abs(penalty - 1.15) < 0.001
+
+    def test_highway_penalty_cycleway(self):
+        """自転車専用道の優遇"""
+        penalty = WeightCalculator.get_highway_penalty('cycleway')
+        assert abs(penalty - 0.6) < 0.001
+
+    def test_calculate_weight_with_highway(self):
+        """道路種別を考慮した重み計算"""
+        # residential: 100 * 0.60 * 1.15 = 69
+        weight = WeightCalculator.calculate_weight(100, is_safe=True, safety=5, highway='residential')
+        assert abs(weight - 69) < 0.1
 
 
 class TestRouteCalculatorInit:

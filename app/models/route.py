@@ -272,7 +272,7 @@ class RouteSegment(BaseModel):
         description="ルートジオメトリ"
     )
     voice_instructions: list[VoiceInstruction] = Field(
-        default=[],
+        default_factory=list,
         alias="voiceInstructions",
         description="音声指示リスト"
     )

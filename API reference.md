@@ -250,7 +250,7 @@ Map Matching APIでは、座標リストの中で「実際の経由地点」の�
 | `origin` | string | ✓ | 出発地 "経度,緯度" |
 | `destination` | string | ✓ | 目的地 "経度,緯度" |
 | `mode` | string | ✓ | "my-cycle" / "share-cycle" |
-| `safety` | int | ✓ | 1-10 |
+| `safety` | int | ✓ | 1-5 |
 | `needParking` | bool | - | 駐輪場案内が必要か（デフォルト: true） |
 | `operators` | string | - | 事業者（カンマ区切り、share-cycle時に使用） |
 
@@ -380,8 +380,8 @@ async def lifespan(app: FastAPI):
 ## 付録B: 重み計算式
 
 ```
-safe_factor = 1.0 - (safety × 0.03)    # 0.97 ~ 0.70
-normal_factor = 1.0 + (safety × 0.2)   # 1.2 ~ 3.0
+safe_factor = 1.0 - (safety × 0.16)    # 0.84 ~ 0.20
+normal_factor = 1.0 + (safety × 1.0)   # 2.0 ~ 6.0
 
 if is_safe:
     cost = length × safe_factor
@@ -391,9 +391,9 @@ else:
 
 | safety | safe_factor | normal_factor | 100m安全道 | 100m通常道 |
 |--------|-------------|---------------|-----------|-----------|
-| 1 | 0.97 | 1.2 | 97m | 120m |
-| 5 | 0.85 | 2.0 | 85m | 200m |
-| 10 | 0.70 | 3.0 | 70m | 300m |
+| 1 | 0.84 | 2.0 | 84m | 200m |
+| 3 | 0.52 | 4.0 | 52m | 400m |
+| 5 | 0.20 | 6.0 | 20m | 600m |
 
 ---
 

@@ -749,7 +749,7 @@ class TestErrorHandling:
                 "origin": f"{KYOTO_STATION[0]},{KYOTO_STATION[1]}",
                 "destination": f"{NIJO_CASTLE[0]},{NIJO_CASTLE[1]}",
                 "mode": "my-cycle",
-                "safety": 15,  # 範囲外（1-10）
+                "safety": 6,  # 範囲外（1-5）
             }
         )
 

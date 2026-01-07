@@ -67,14 +67,14 @@ class TestRouteAPIValidation:
         assert response.status_code == 422
 
     async def test_safety_above_range(self, async_client):
-        """safetyが範囲外（11）の場合"""
+        """safetyが範囲外（6）の場合"""
         response = await async_client.get(
             "/api/route",
             params={
                 "origin": f"{KYOTO_STATION[0]},{KYOTO_STATION[1]}",
                 "destination": f"{NIJO_CASTLE[0]},{NIJO_CASTLE[1]}",
                 "mode": "my-cycle",
-                "safety": 11,
+                "safety": 6,
             }
         )
         assert response.status_code == 422

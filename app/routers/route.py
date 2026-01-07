@@ -134,8 +134,8 @@ def is_in_kyoto(lon: float, lat: float) -> bool:
 ## 安全度パラメータ
 
 - `safety=1`: 最短距離重視
-- `safety=5`: バランス
-- `safety=10`: 安全最優先（安全道を大幅に優遇）
+- `safety=3`: バランス
+- `safety=5`: 安全最優先（安全道を大幅に優遇）
     """,
     responses={
         200: {"description": "成功"},
@@ -161,8 +161,8 @@ async def search_route(
     )],
     safety: Annotated[int, Query(
         ge=1,
-        le=10,
-        description="安全指数 1-10",
+        le=5,
+        description="安全指数 1-5",
     )],
     # --- オプションパラメータ ---
     needParking: Annotated[bool, Query(
@@ -347,7 +347,7 @@ async def _handle_parking_route(
                 ),
                 voice_instructions=voice_instructions,
             ),
-            # 徒歩区間: parking → destination
+            # 徒歩区間: parking → destination（A*で探索した実際のルート）
             RouteSegment(
                 type=SegmentType.WALK,
                 from_=RoutePoint(
@@ -361,7 +361,7 @@ async def _handle_parking_route(
                     name="目的地",
                 ),
                 route=RouteGeometry(
-                    geometry=GeoJSONLineString(coordinates=[parking.coordinates, list(destination)]),
+                    geometry=GeoJSONLineString(coordinates=result['walk_route']['coordinates']),
                     distance=result['walk_distance'],
                     duration=result['walk_duration'],
                     safety_score=None,
@@ -428,7 +428,7 @@ async def _handle_share_cycle_route(
 
         # セグメント作成
         segments = [
-            # 徒歩区間: origin → borrow_port
+            # 徒歩区間: origin → borrow_port（A*で探索した実際のルート）
             RouteSegment(
                 type=SegmentType.WALK,
                 from_=RoutePoint(
@@ -443,9 +443,9 @@ async def _handle_share_cycle_route(
                     id=borrow_port.id,
                 ),
                 route=RouteGeometry(
-                    geometry=GeoJSONLineString(coordinates=[list(origin), borrow_port.coordinates]),
+                    geometry=GeoJSONLineString(coordinates=result['walk_to_port_route']['coordinates']),
                     distance=result['walk_to_port'],
-                    duration=result['walk_to_port'] / 1.4,
+                    duration=result['walk_to_port_route']['duration'],
                     safety_score=None,
                 ),
                 voice_instructions=[],
@@ -472,7 +472,7 @@ async def _handle_share_cycle_route(
                 ),
                 voice_instructions=voice_instructions,
             ),
-            # 徒歩区間: return_port → destination
+            # 徒歩区間: return_port → destination（A*で探索した実際のルート）
             RouteSegment(
                 type=SegmentType.WALK,
                 from_=RoutePoint(
@@ -486,9 +486,9 @@ async def _handle_share_cycle_route(
                     name="目的地",
                 ),
                 route=RouteGeometry(
-                    geometry=GeoJSONLineString(coordinates=[return_port.coordinates, list(destination)]),
+                    geometry=GeoJSONLineString(coordinates=result['walk_from_port_route']['coordinates']),
                     distance=result['walk_from_port'],
-                    duration=result['walk_from_port'] / 1.4,
+                    duration=result['walk_from_port_route']['duration'],
                     safety_score=None,
                 ),
                 voice_instructions=[],

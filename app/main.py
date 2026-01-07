@@ -297,7 +297,7 @@ async def get_weight_factors():
     from app.services.route_calculator import WeightCalculator
 
     factors = {}
-    for safety in range(1, 11):
+    for safety in range(1, 6):
         safe_factor, normal_factor = WeightCalculator.get_factors(safety)
         factors[f"safety_{safety}"] = {
             "safe_factor": round(safe_factor, 3),

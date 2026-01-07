@@ -55,13 +55,13 @@ class WeightCalculator:
     """
     エッジ重み計算クラス
 
-    安全度パラメータ（1-10）に基づいて、エッジの重みを計算。
+    安全度パラメータ（1-5）に基づいて、エッジの重みを計算。
     is_safe=True の道を積極的に提案するため、大きな差をつける。
     また、細い道を避けて主要道路を優先（曲がり角削減）。
 
     係数（強化版）:
-        safe_factor = 1.0 - (safety * 0.08)   # 0.92 ~ 0.20（安全道を大幅優遇）
-        normal_factor = 1.0 + (safety * 0.5)  # 1.5 ~ 6.0（通常道に強いペナルティ）
+        safe_factor = 1.0 - (safety * 0.16)   # 0.84 ~ 0.20（安全道を大幅優遇）
+        normal_factor = 1.0 + (safety * 1.0)  # 2.0 ~ 6.0（通常道に強いペナルティ）
 
     道路種別ペナルティ:
         - tertiary以上（三次道路以上）: 0.8（優遇）
@@ -98,10 +98,10 @@ class WeightCalculator:
     @staticmethod
     def get_factors(safety: int) -> tuple[float, float]:
         """安全度に応じた係数を計算（強化版）"""
-        # 安全道: safety=10で0.2（5倍速く通れる感覚）
-        safe_factor = max(0.2, 1.0 - (safety * 0.08))
-        # 通常道: safety=10で6.0（6倍遠回りしてでも避ける）
-        normal_factor = 1.0 + (safety * 0.5)
+        # 安全道: safety=5で0.2（5倍速く通れる感覚）
+        safe_factor = max(0.2, 1.0 - (safety * 0.16))
+        # 通常道: safety=5で6.0（6倍遠回りしてでも避ける）
+        normal_factor = 1.0 + (safety * 1.0)
         return safe_factor, normal_factor
 
     @staticmethod
@@ -228,7 +228,7 @@ class RouteCalculator:
         WALK_SPEED: 徒歩速度（m/s）
     """
     
-    PRECOMPUTED_LEVELS = [1, 3, 5, 7, 10]
+    PRECOMPUTED_LEVELS = [1, 3, 5]
     BICYCLE_SPEED = 4.17  # 時速15km
     WALK_SPEED = 1.4      # 時速5km
     
@@ -354,6 +354,30 @@ class RouteCalculator:
         weight = self._get_weight(safety)
 
         return self._find_path_astar(self.graph, orig_node, dest_node, weight)
+
+    def _find_walk_route(
+        self,
+        origin: tuple[float, float],
+        destination: tuple[float, float],
+    ) -> list[int]:
+        """
+        A*アルゴリズムで徒歩ルート探索（距離最優先）
+
+        安全度を考慮しない最短距離ルート。
+        徒歩は短距離なので、単純に「length」エッジ属性で探索。
+
+        Args:
+            origin: 出発地 (経度, 緯度)
+            destination: 目的地 (経度, 緯度)
+
+        Returns:
+            ノードIDのリスト
+        """
+        orig_node = self._find_nearest_node(origin[0], origin[1])
+        dest_node = self._find_nearest_node(destination[0], destination[1])
+
+        # 徒歩は「length」でシンプルに探索（安全度考慮なし）
+        return self._find_path_astar(self.graph, orig_node, dest_node, weight='length')
     
     def _calculate_route_info(self, route: list[int]) -> RouteResult:
         """ルートの詳細情報を計算"""
@@ -361,12 +385,12 @@ class RouteCalculator:
         total_distance = 0.0
         safe_distance = 0.0
         normal_distance = 0.0
-        
+
         for node in route:
             x = self.graph.nodes[node]['x']
             y = self.graph.nodes[node]['y']
             coordinates.append([x, y])
-        
+
         for u, v in zip(route[:-1], route[1:]):
             edge_data = self.graph.get_edge_data(u, v)
             if edge_data:
@@ -377,16 +401,16 @@ class RouteCalculator:
                     if length < min_length:
                         min_length = length
                         min_is_safe = data.get('is_safe', False)
-                
+
                 total_distance += min_length
                 if min_is_safe:
                     safe_distance += min_length
                 else:
                     normal_distance += min_length
-        
+
         safety_score = (safe_distance / total_distance * 10) if total_distance > 0 else 5.0
         duration = total_distance / self.BICYCLE_SPEED
-        
+
         return RouteResult(
             nodes=route,
             coordinates=coordinates,
@@ -396,6 +420,46 @@ class RouteCalculator:
             safe_distance=safe_distance,
             normal_distance=normal_distance,
         )
+
+    def _calculate_walk_route_info(self, route: list[int]) -> dict:
+        """
+        徒歩ルートの詳細情報を計算
+
+        Returns:
+            {
+                'coordinates': [[lon, lat], ...],
+                'distance': 総距離（メートル）,
+                'duration': 所要時間（秒）
+            }
+        """
+        coordinates = []
+        total_distance = 0.0
+
+        for node in route:
+            x = self.graph.nodes[node]['x']
+            y = self.graph.nodes[node]['y']
+            coordinates.append([x, y])
+
+        for u, v in zip(route[:-1], route[1:]):
+            edge_data = self.graph.get_edge_data(u, v)
+            if edge_data:
+                # 複数エッジがある場合は最短を選択
+                min_length = float('inf')
+                for key, data in edge_data.items():
+                    length = data.get('length', 0)
+                    if length < min_length:
+                        min_length = length
+
+                total_distance += min_length
+
+        # 徒歩速度: 1.4 m/s (時速5km)
+        duration = total_distance / self.WALK_SPEED
+
+        return {
+            'coordinates': coordinates,
+            'distance': total_distance,
+            'duration': duration,
+        }
     
     # =========================================================================
     # 公開API
@@ -417,7 +481,7 @@ class RouteCalculator:
         Args:
             origin: 出発地 (経度, 緯度)
             destination: 目的地 (経度, 緯度)
-            safety: 安全度 (1-10)
+            safety: 安全度 (1-5)
 
         Returns:
             RouteResult
@@ -433,30 +497,52 @@ class RouteCalculator:
     ) -> dict:
         """
         駐輪場経由ルート計算（UC-1）
-        
+
+        自転車ルート（出発地→駐輪場）と徒歩ルート（駐輪場→目的地）を計算。
+
         Returns:
-            {parking, bicycle_route, walk_distance, walk_duration, total_distance, total_duration}
+            {
+                'parking': Parking,
+                'bicycle_route': RouteResult,
+                'walk_route': RouteResult,
+                'walk_distance': 徒歩距離（メートル）,
+                'walk_duration': 徒歩所要時間（秒）,
+                'total_distance': 総距離（メートル）,
+                'total_duration': 総所要時間（秒）
+            }
         """
         parking = self._find_nearest_parking(destination, max_distance=800)
         if parking is None:
             raise ValueError("目的地付近に駐輪場が見つかりません")
-        
+
         parking_coords = (parking.coordinates[0], parking.coordinates[1])
         bicycle_route = self.calculate_direct_route(origin, parking_coords, safety)
-        
-        walk_distance = haversine_distance(
-            parking_coords[0], parking_coords[1],
-            destination[0], destination[1],
-        )
-        walk_duration = walk_distance / self.WALK_SPEED
-        
+
+        # 徒歩ルートはA*で探索（道路に沿ったルート）
+        try:
+            walk_route_nodes = self._find_walk_route(parking_coords, destination)
+            walk_route_info = self._calculate_walk_route_info(walk_route_nodes)
+        except Exception as e:
+            # ルートが見つからない場合は直線距離にフォールバック
+            print(f"Walk route not found: {e}. Using haversine distance as fallback.")
+            walk_distance = haversine_distance(
+                parking_coords[0], parking_coords[1],
+                destination[0], destination[1],
+            )
+            walk_route_info = {
+                'coordinates': [list(parking_coords), list(destination)],
+                'distance': walk_distance,
+                'duration': walk_distance / self.WALK_SPEED,
+            }
+
         return {
             'parking': parking,
             'bicycle_route': bicycle_route,
-            'walk_distance': walk_distance,
-            'walk_duration': walk_duration,
-            'total_distance': bicycle_route.distance + walk_distance,
-            'total_duration': bicycle_route.duration + walk_duration,
+            'walk_route': walk_route_info,
+            'walk_distance': walk_route_info['distance'],
+            'walk_duration': walk_route_info['duration'],
+            'total_distance': bicycle_route.distance + walk_route_info['distance'],
+            'total_duration': bicycle_route.duration + walk_route_info['duration'],
         }
     
     def calculate_share_cycle_route(
@@ -468,34 +554,78 @@ class RouteCalculator:
     ) -> dict:
         """
         シェアサイクルルート計算（UC-3）
-        
+
+        出発地→レンタルポート（徒歩、A*で探索）
+        レンタルポート→返却ポート（自転車）
+        返却ポート→目的地（徒歩、A*で探索）
+
         Returns:
-            {borrow_port, return_port, walk_to_port, bicycle_route, walk_from_port, total_distance, total_duration}
+            {
+                'borrow_port': Port,
+                'return_port': Port,
+                'walk_to_port_route': 徒歩ルート情報,
+                'walk_to_port': 距離（メートル）,
+                'bicycle_route': RouteResult,
+                'walk_from_port_route': 徒歩ルート情報,
+                'walk_from_port': 距離（メートル）,
+                'total_distance': 総距離（メートル）,
+                'total_duration': 総所要時間（秒）
+            }
         """
         borrow_port, return_port = self._find_best_ports(origin, destination, ports)
-        
+
         if borrow_port is None:
             raise ValueError("空きのあるポートが見つかりません")
         if return_port is None:
             raise ValueError("返却可能なポートが見つかりません")
-        
+
         borrow_coords = (borrow_port.coordinates[0], borrow_port.coordinates[1])
         return_coords = (return_port.coordinates[0], return_port.coordinates[1])
-        
-        walk_to_port = haversine_distance(origin[0], origin[1], borrow_coords[0], borrow_coords[1])
+
+        # 出発地→レンタルポートの徒歩ルート（A*探索）
+        try:
+            walk_to_port_nodes = self._find_walk_route(origin, borrow_coords)
+            walk_to_port_info = self._calculate_walk_route_info(walk_to_port_nodes)
+        except Exception as e:
+            # ルートが見つからない場合は直線距離にフォールバック
+            print(f"Walk route to port not found: {e}. Using haversine distance as fallback.")
+            walk_distance = haversine_distance(origin[0], origin[1], borrow_coords[0], borrow_coords[1])
+            walk_to_port_info = {
+                'coordinates': [list(origin), list(borrow_coords)],
+                'distance': walk_distance,
+                'duration': walk_distance / self.WALK_SPEED,
+            }
+
+        # レンタルポート→返却ポートの自転車ルート
         bicycle_route = self.calculate_direct_route(borrow_coords, return_coords, safety)
-        walk_from_port = haversine_distance(return_coords[0], return_coords[1], destination[0], destination[1])
-        
-        walk_duration = (walk_to_port + walk_from_port) / self.WALK_SPEED
-        
+
+        # 返却ポート→目的地の徒歩ルート（A*探索）
+        try:
+            walk_from_port_nodes = self._find_walk_route(return_coords, destination)
+            walk_from_port_info = self._calculate_walk_route_info(walk_from_port_nodes)
+        except Exception as e:
+            # ルートが見つからない場合は直線距離にフォールバック
+            print(f"Walk route from port not found: {e}. Using haversine distance as fallback.")
+            walk_distance = haversine_distance(return_coords[0], return_coords[1], destination[0], destination[1])
+            walk_from_port_info = {
+                'coordinates': [list(return_coords), list(destination)],
+                'distance': walk_distance,
+                'duration': walk_distance / self.WALK_SPEED,
+            }
+
+        total_walk_distance = walk_to_port_info['distance'] + walk_from_port_info['distance']
+        total_walk_duration = walk_to_port_info['duration'] + walk_from_port_info['duration']
+
         return {
             'borrow_port': borrow_port,
             'return_port': return_port,
-            'walk_to_port': walk_to_port,
+            'walk_to_port_route': walk_to_port_info,
+            'walk_to_port': walk_to_port_info['distance'],
             'bicycle_route': bicycle_route,
-            'walk_from_port': walk_from_port,
-            'total_distance': walk_to_port + bicycle_route.distance + walk_from_port,
-            'total_duration': walk_duration + bicycle_route.duration,
+            'walk_from_port_route': walk_from_port_info,
+            'walk_from_port': walk_from_port_info['distance'],
+            'total_distance': total_walk_distance + bicycle_route.distance,
+            'total_duration': total_walk_duration + bicycle_route.duration,
         }
     
     # =========================================================================

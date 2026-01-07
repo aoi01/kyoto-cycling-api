@@ -796,52 +796,33 @@ async def _get_voice_instructions(
     mapbox_client: MapboxClient,
 ) -> tuple[list[VoiceInstruction], Optional[list[list[float]]]]:
     """
-    Mapbox Map Matching APIで音声指示を取得
+    Mapbox Directions APIで音声指示を取得
 
-    自前グラフで計算したルート座標をダウンサンプリングして
-    Map Matching APIに送信する。
-
-    Map Matching APIのwaypointsパラメータで始点・終点のみを指定することで、
-    中間座標はルート形状の参考としてのみ使用され、
-    「○つ目の目的地に到着しました」という不要な指示が出ない。
-
-    処理フロー:
-    1. ルート座標をダウンサンプリング（最大100点）
-    2. Map Matching APIに送信（waypoints=始点・終点のみ）
-    3. 音声指示から中間到着指示をフィルタリング
+    始点・終点を指定してDirections APIを呼び出し、音声指示を取得。
+    シンプルで高速。
 
     Args:
         origin: 始点 (経度, 緯度)
         destination: 終点 (経度, 緯度)
-        coordinates: 自前グラフで計算したルート座標
+        coordinates: 自前グラフで計算したルート座標（参考値）
         mapbox_client: Mapboxクライアント
 
     Returns:
         (音声指示リスト, Mapboxが返したルート座標リスト)
     """
     try:
-        # Douglas-Peuckerで座標を簡略化
-        simplified_coords = _simplify_coordinates(
-            coordinates,
-            tolerance=0.0001,  # 約11m
-            max_count=100,     # Map Matching API制限
-        )
-
-        print(f"Coordinates: {len(coordinates)} -> {len(simplified_coords)} (simplified)")
-
-        # Map Matching APIを使用
-        # waypointsパラメータは mapbox_client.map_match 内部で
-        # 始点・終点のみに設定される
-        geometry, instructions, distance, duration = await mapbox_client.map_match(
-            coordinates=simplified_coords,
+        # Directions APIで音声指示を取得
+        geometry, instructions, distance, duration = await mapbox_client.get_directions(
+            origin=origin,
+            destination=destination,
             profile="cycling"
         )
 
-        # 中間到着指示をフィルタリング
+        # 不要な指示をフィルタリング
         filtered_instructions = _filter_voice_instructions(instructions)
 
         return filtered_instructions, geometry.coordinates
 
     except Exception as e:
-        print(f"Map Matching API failed: {e}")
+        print(f"Directions API failed: {e}")
         return [], None

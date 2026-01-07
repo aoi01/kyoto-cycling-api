@@ -277,31 +277,19 @@ class RouteCalculator:
             weight=weight,
         )
     
-    def _find_route_with_subgraph(
+    def _find_route(
         self,
         origin: tuple[float, float],
         destination: tuple[float, float],
         safety: int,
-        margin_ratio: float = 0.2,
     ) -> list[int]:
-        """サブグラフを使用してルート探索"""
-        bbox = calculate_bounding_box(origin, destination, margin_ratio)
-        subgraph = create_subgraph_view(self.graph, bbox)
-        
+        """A*アルゴリズムでルート探索（全グラフを対象）"""
         orig_node = self._find_nearest_node(origin[0], origin[1])
         dest_node = self._find_nearest_node(destination[0], destination[1])
-        
-        if orig_node not in subgraph or dest_node not in subgraph:
-            bbox = calculate_bounding_box(origin, destination, margin_ratio=0.5)
-            subgraph = create_subgraph_view(self.graph, bbox)
-        
+
         weight = self._get_weight(safety)
-        
-        try:
-            return self._find_path_astar(subgraph, orig_node, dest_node, weight)
-        except nx.NetworkXNoPath:
-            print("Subgraph search failed. Falling back to full graph.")
-            return self._find_path_astar(self.graph, orig_node, dest_node, weight)
+
+        return self._find_path_astar(self.graph, orig_node, dest_node, weight)
     
     def _calculate_route_info(self, route: list[int]) -> RouteResult:
         """ルートの詳細情報を計算"""
@@ -357,16 +345,20 @@ class RouteCalculator:
     ) -> RouteResult:
         """
         直接ルート計算（UC-2）
-        
+
+        A*アルゴリズムを使用して最適なルートを計算。
+        ヒューリスティック（直線距離）により、目的地方向の探索を優先し、
+        Dijkstra法と比べて大幅に計算量を削減。
+
         Args:
             origin: 出発地 (経度, 緯度)
             destination: 目的地 (経度, 緯度)
             safety: 安全度 (1-10)
-        
+
         Returns:
             RouteResult
         """
-        route = self._find_route_with_subgraph(origin, destination, safety)
+        route = self._find_route(origin, destination, safety)
         return self._calculate_route_info(route)
     
     def calculate_route_with_parking(

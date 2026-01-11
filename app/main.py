@@ -43,7 +43,8 @@ class Settings:
     CORS_ORIGINS: list[str] = [
         "http://localhost:5173",      # Vite開発サーバー
         "http://localhost:3000",      # その他
-        "https://your-frontend.com",  # 本番環境
+        "https://*.vercel.app",        # Vercel本番・プレビュー環境
+        "*",                           # 全てのオリジンを許可（開発時）
     ]
 
 
@@ -193,12 +194,12 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS設定
+# CORS設定（全てのオリジンを許可）
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.CORS_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["GET", "POST"],
+    allow_origins=["*"],  # 全てのオリジンを許可
+    allow_credentials=False,  # credentials=Trueと*は併用不可
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 

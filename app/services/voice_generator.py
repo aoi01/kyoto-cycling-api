@@ -231,6 +231,12 @@ class VoiceInstructionGenerator:
         """
         ルート座標から音声案内を生成
 
+        改善点:
+        1. 累積距離を一度だけ計算し、各曲がり角では参照のみ
+        2. 曲がり角までの実際の距離で案内テキストを生成
+        3. 50m手前で案内を開始し、その距離で「○○メートル先」と案内
+        4. 重複排除時は実際の距離値を使用（丸め込みなし）
+
         Args:
             coordinates: ルート座標 [[経度, 緯度], ...]
 
@@ -244,63 +250,60 @@ class VoiceInstructionGenerator:
                 announcement="目的地に到着しました",
             )]
 
+        # 累積距離を事前計算（インデックス i は coordinates[i] から coordinates[i+1] までの距離）
+        cumulative_distances = [0.0]
+        for j in range(len(coordinates) - 1):
+            lon1, lat1 = coordinates[j]
+            lon2, lat2 = coordinates[j + 1]
+            dist = _haversine_distance(lon1, lat1, lon2, lat2)
+            cumulative_distances.append(cumulative_distances[-1] + dist)
+
+        total_distance = cumulative_distances[-1]
+
         # 曲がり角を検出
         turn_points = cls._detect_turn_points(coordinates)
 
         if not turn_points:
             # 曲がり角がない場合は、最後の案内のみ
             return [VoiceInstruction(
-                distance_along_geometry=0,
+                distance_along_geometry=total_distance,
                 announcement="目的地に到着しました",
             )]
 
         instructions = []
 
         # 各曲がり角に対して案内を生成
-        for i, turn_point in enumerate(turn_points):
+        for turn_point in turn_points:
             # 曲がり角の方向を判定
             direction = cls._determine_turn_direction(turn_point)
 
-            # 曲がり角までの距離を計算（累積距離）
-            cumulative_distance = 0.0
-            for j in range(turn_point.index):
-                lon1, lat1 = coordinates[j]
-                lon2, lat2 = coordinates[j + 1]
-                cumulative_distance += _haversine_distance(lon1, lat1, lon2, lat2)
+            # 曲がり角までの距離（事前計算した累積距離から参照）
+            distance_to_turn = cumulative_distances[turn_point.index]
 
-            # 案内を開始する距離（曲がり角の50m手前）
-            announcement_distance = cumulative_distance - cls.ANNOUNCEMENT_DISTANCE
+            # ルート総距離を超えないようにクリップ
+            distance_to_turn = min(distance_to_turn, total_distance)
 
-            # 50m以上先の場合のみ案内を生成
-            if announcement_distance >= 0:
+            # 曲がり角までの距離が10m以上の場合のみ案内を生成
+            # （非常に短い距離では案内の意味がないため）
+            if distance_to_turn >= 10:
+                # 案内を開始する距離（曲がり角の50m手前）
+                # ただし、0より小さくならないように調整
+                announcement_distance = max(0, distance_to_turn - cls.ANNOUNCEMENT_DISTANCE)
+
+                # 案内テキストに使う「残り距離」は、実際に50m手前で案内する場合は50m
+                # 50m未満の場合は実際の距離をそのまま使用
+                remaining_distance = min(cls.ANNOUNCEMENT_DISTANCE, distance_to_turn)
+
                 announcement = cls._generate_announcement(
-                    cls.ANNOUNCEMENT_DISTANCE,
+                    remaining_distance,
                     direction
                 )
                 instructions.append(VoiceInstruction(
                     distance_along_geometry=announcement_distance,
                     announcement=announcement,
                 ))
-            else:
-                # 50m未満の場合は、距離が少ない案内を生成
-                actual_distance = cumulative_distance
-                if actual_distance > 0:
-                    announcement = cls._generate_announcement(
-                        actual_distance,
-                        direction
-                    )
-                    instructions.append(VoiceInstruction(
-                        distance_along_geometry=0,
-                        announcement=announcement,
-                    ))
 
         # 最後に「目的地に到着しました」を追加
-        total_distance = 0.0
-        for j in range(len(coordinates) - 1):
-            lon1, lat1 = coordinates[j]
-            lon2, lat2 = coordinates[j + 1]
-            total_distance += _haversine_distance(lon1, lat1, lon2, lat2)
-
         instructions.append(VoiceInstruction(
             distance_along_geometry=total_distance,
             announcement="目的地に到着しました",
@@ -309,13 +312,13 @@ class VoiceInstructionGenerator:
         # 距離順にソート
         instructions.sort(key=lambda x: x.distance_along_geometry)
 
-        # 同じ距離の重複を排除（最初のものだけ残す）
-        seen_distances = set()
+        # 同じ距離の重複を排除（距離値で直接比較、差分1m未満）
         unique_instructions = []
+        last_distance = -float('inf')
         for inst in instructions:
-            dist_key = round(inst.distance_along_geometry, -1)  # 10m単位で丸める
-            if dist_key not in seen_distances:
+            # 前の案内との距離差が1m以上の場合のみ追加
+            if inst.distance_along_geometry - last_distance >= 1.0:
                 unique_instructions.append(inst)
-                seen_distances.add(dist_key)
+                last_distance = inst.distance_along_geometry
 
         return unique_instructions

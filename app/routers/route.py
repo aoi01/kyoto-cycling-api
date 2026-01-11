@@ -136,6 +136,11 @@ def is_in_kyoto(lon: float, lat: float) -> bool:
 - `safety=1`: 最短距離重視
 - `safety=3`: バランス
 - `safety=5`: 安全最優先（安全道を大幅に優遇）
+
+## 現在位置チェック
+
+ナビ開始時には `currentLocation` パラメータを指定してください。
+現在位置と出発地が50m以上離れている場合、エラーが返されます。
     """,
     responses={
         200: {"description": "成功"},
@@ -165,6 +170,11 @@ async def search_route(
         description="安全指数 1-5",
     )],
     # --- オプションパラメータ ---
+    currentLocation: Annotated[Optional[str], Query(
+        pattern=r"^-?\d+\.?\d*,-?\d+\.?\d*$",
+        description="現在位置座標 '経度,緯度'（ナビ開始時に指定）",
+        examples=["135.7588,34.9858"],
+    )] = None,
     needParking: Annotated[bool, Query(
         description="駐輪場案内が必要か（my-cycle時のみ有効）",
     )] = False,
@@ -181,9 +191,10 @@ async def search_route(
 
     処理フロー:
     1. 座標パース・バリデーション
-    2. モードに応じたルート計算
-    3. 自前で音声案内を生成（VoiceInstructionGenerator）
-    4. レスポンス整形
+    2. 現在位置と出発地の乖離チェック（currentLocation指定時）
+    3. モードに応じたルート計算
+    4. 自前で音声案内を生成（VoiceInstructionGenerator）
+    5. レスポンス整形
     """
     try:
         # === 1. 座標パース ===
@@ -202,10 +213,26 @@ async def search_route(
                 "目的地が京都市外です"
             )
 
+        # === 3. 現在位置チェック（ナビ開始時） ===
+        if currentLocation:
+            current_lon, current_lat = parse_coordinates(currentLocation)
+            from app.services.route_calculator import haversine_distance
+
+            distance_from_origin = haversine_distance(
+                current_lon, current_lat, origin_lon, origin_lat
+            )
+
+            # 50m以上離れている場合はエラー
+            if distance_from_origin > 50:
+                return create_error_response(
+                    "LOCATION_MISMATCH",
+                    f"現在位置が出発地から{int(distance_from_origin)}m離れています。出発地点に移動してからナビを開始してください。"
+                )
+
         origin_coords = (origin_lon, origin_lat)
         dest_coords = (dest_lon, dest_lat)
 
-        # === 3. モードに応じたルート計算 ===
+        # === 4. モードに応じたルート計算 ===
         if mode == TransportMode.SHARE_CYCLE:
             # UC-3: シェアサイクルルート
             return await _handle_share_cycle_route(
@@ -457,6 +484,7 @@ async def _handle_share_cycle_route(
                     type=PointType.PORT,
                     coordinates=borrow_port.coordinates,
                     name=borrow_port.name,
+                    id=borrow_port.id,
                 ),
                 to=RoutePoint(
                     type=PointType.PORT,

@@ -1,0 +1,60 @@
+# Cloud Build設定ファイル
+# gcloud builds submit --config cloudbuild.yaml で使用
+
+steps:
+  # Dockerイメージをビルド
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - 'asia-northeast1-docker.pkg.dev/$PROJECT_ID/kyoto-cycling-api/api:$COMMIT_SHA'
+      - '-t'
+      - 'asia-northeast1-docker.pkg.dev/$PROJECT_ID/kyoto-cycling-api/api:latest'
+      - '.'
+    timeout: 600s
+
+  # Dockerイメージをプッシュ
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - 'asia-northeast1-docker.pkg.dev/$PROJECT_ID/kyoto-cycling-api/api:$COMMIT_SHA'
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - 'asia-northeast1-docker.pkg.dev/$PROJECT_ID/kyoto-cycling-api/api:latest'
+
+  # Cloud Runにデプロイ
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - 'kyoto-cycling-api'
+      - '--image'
+      - 'asia-northeast1-docker.pkg.dev/$PROJECT_ID/kyoto-cycling-api/api:$COMMIT_SHA'
+      - '--region'
+      - 'asia-northeast1'
+      - '--platform'
+      - 'managed'
+      - '--allow-unauthenticated'
+      - '--memory'
+      - '2Gi'
+      - '--cpu'
+      - '2'
+      - '--timeout'
+      - '300'
+      - '--max-instances'
+      - '10'
+      - '--set-env-vars'
+      - 'MAPBOX_ACCESS_TOKEN=${_MAPBOX_TOKEN}'
+
+# ビルドタイムアウト
+timeout: 1200s
+
+# 置換変数
+substitutions:
+  _MAPBOX_TOKEN: 'your_mapbox_token_here'
+
+options:
+  machineType: 'E2_HIGHCPU_8'

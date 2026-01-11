@@ -56,73 +56,58 @@ class WeightCalculator:
     エッジ重み計算クラス
 
     安全度パラメータ（1-5）に基づいて、エッジの重みを計算。
-    is_safe=True の道を積極的に提案するため、大きな差をつける。
-    また、細い道を避けて主要道路を優先（曲がり角削減）。
+    is_safe=True の道のみを考慮し、現実的な迂回率を実現。
 
-    係数（強化版）:
-        safe_factor = 1.0 - (safety * 0.16)   # 0.84 ~ 0.20（安全道を大幅優遇）
-        normal_factor = 1.0 + (safety * 1.0)  # 2.0 ~ 6.0（通常道に強いペナルティ）
+    設計方針:
+    - 業界標準（GraphHopper, OSRM, OpenRouteService）を参考
+    - 実際のサイクリストの行動（10-63%の迂回許容）に基づく
+    - is_safeのみで判断（道路種別タグは無視）
 
-    道路種別ペナルティ:
-        - tertiary以上（三次道路以上）: 0.8（優遇）
-        - residential/service: 1.2（ペナルティ）
-        - path/track: 1.5（強いペナルティ）
+    係数（改善版）:
+        safe_factor = 1.0 - (safety * 0.08)   # safety=5で0.6（40%速く通れる）
+        normal_factor = 1.0 + (safety * 0.2)  # safety=5で2.0（2倍遅く通れる）
+
+    重み比率:
+        safety=1: 1.3:1（約30%迂回）
+        safety=3: 2.1:1（約110%迂回）- Google Maps風のバランス
+        safety=5: 3.3:1（約230%迂回）
     """
-
-    # 道路種別ペナルティ（主要道路を優先、細い道を避ける）
-    HIGHWAY_PENALTY = {
-        # 主要道路（優遇）
-        'trunk': 0.7,
-        'trunk_link': 0.7,
-        'primary': 0.75,
-        'primary_link': 0.75,
-        'secondary': 0.8,
-        'secondary_link': 0.8,
-        'tertiary': 0.85,
-        'tertiary_link': 0.85,
-        # 自転車専用道（最優遇）
-        'cycleway': 0.6,
-        # 中間
-        'unclassified': 1.0,
-        # 住宅街・細い道（ペナルティ）
-        'residential': 1.15,
-        'service': 1.2,
-        'living_street': 1.1,
-        # 遊歩道・未舗装（強いペナルティ）
-        'path': 1.4,
-        'track': 1.5,
-        'pedestrian': 1.3,
-        'busway': 1.5,
-    }
 
     @staticmethod
     def get_factors(safety: int) -> tuple[float, float]:
-        """安全度に応じた係数を計算（強化版）"""
-        # 安全道: safety=5で0.2（5倍速く通れる感覚）
-        safe_factor = max(0.2, 1.0 - (safety * 0.16))
-        # 通常道: safety=5で6.0（6倍遠回りしてでも避ける）
-        normal_factor = 1.0 + (safety * 1.0)
+        """
+        安全度に応じた係数を計算
+
+        Args:
+            safety: 安全度（1-5）
+
+        Returns:
+            (safe_factor, normal_factor): 安全道係数、通常道係数
+        """
+        # 範囲外の値を1-5にクリップ（防御的プログラミング）
+        safety = max(1, min(5, safety))
+
+        # 安全道: safety=5で0.6（40%速く通れる扱い）
+        safe_factor = max(0.6, 1.0 - (safety * 0.08))
+        # 通常道: safety=5で2.0（2倍遅く通れる扱い）
+        normal_factor = 1.0 + (safety * 0.2)
         return safe_factor, normal_factor
 
     @staticmethod
-    def get_highway_penalty(highway: str) -> float:
-        """道路種別に応じたペナルティを取得"""
-        if isinstance(highway, list):
-            highway = highway[0] if highway else 'unclassified'
-        return WeightCalculator.HIGHWAY_PENALTY.get(highway, 1.0)
+    def calculate_weight(length: float, is_safe: bool, safety: int) -> float:
+        """
+        エッジの重みを計算（is_safeのみ考慮）
 
-    @staticmethod
-    def calculate_weight(length: float, is_safe: bool, safety: int, highway: str = None) -> float:
-        """エッジの重みを計算（道路種別考慮）"""
+        Args:
+            length: エッジの長さ（メートル）
+            is_safe: 安全道かどうか
+            safety: 安全度（1-5）
+
+        Returns:
+            重み（コスト）
+        """
         safe_factor, normal_factor = WeightCalculator.get_factors(safety)
-        base_cost = length * safe_factor if is_safe else length * normal_factor
-
-        # 道路種別ペナルティを適用
-        if highway:
-            highway_penalty = WeightCalculator.get_highway_penalty(highway)
-            return base_cost * highway_penalty
-
-        return base_cost
+        return length * (safe_factor if is_safe else normal_factor)
 
 
 # =============================================================================
@@ -244,7 +229,7 @@ class RouteCalculator:
         print(f"  - Parkings: {len(self.parkings)}")
     
     def _precompute_edge_costs(self):
-        """代表的なsafetyレベルの重みを事前計算（道路種別考慮）"""
+        """代表的なsafetyレベルの重みを事前計算"""
         print("Precomputing edge costs...")
         for safety in self.PRECOMPUTED_LEVELS:
             attr_name = f'cost_{safety}'
@@ -253,37 +238,36 @@ class RouteCalculator:
             for u, v, k, data in self.graph.edges(keys=True, data=True):
                 length = data.get('length', 10)
                 is_safe = data.get('is_safe', False)
-                highway = data.get('highway', 'unclassified')
 
-                # 基本コスト
-                base_cost = length * safe_factor if is_safe else length * normal_factor
-
-                # 道路種別ペナルティを適用
-                highway_penalty = WeightCalculator.get_highway_penalty(highway)
-                cost = base_cost * highway_penalty
+                # is_safeのみに基づいてコストを計算
+                cost = length * (safe_factor if is_safe else normal_factor)
 
                 self.graph[u][v][k][attr_name] = cost
 
         print(f"  -> Precomputed {len(self.PRECOMPUTED_LEVELS)} levels")
     
     def _get_weight(self, safety: int) -> Union[str, Callable]:
-        """safetyに応じた重みを取得"""
+        """
+        safetyに応じた重みを取得
+
+        Args:
+            safety: 安全度（1-5）
+
+        Returns:
+            事前計算済みの場合は属性名、それ以外は重み計算関数
+        """
+        # 事前計算済みのレベル（1, 3, 5）の場合は属性名を返す
         if safety in self.PRECOMPUTED_LEVELS:
             return f'cost_{safety}'
 
+        # それ以外は動的に計算する関数を返す
         safe_factor, normal_factor = WeightCalculator.get_factors(safety)
 
         def weight_func(u: int, v: int, data: dict) -> float:
             length = data.get('length', 10)
             is_safe = data.get('is_safe', False)
-            highway = data.get('highway', 'unclassified')
-
-            # 基本コスト
-            base_cost = length * safe_factor if is_safe else length * normal_factor
-
-            # 道路種別ペナルティを適用
-            highway_penalty = WeightCalculator.get_highway_penalty(highway)
-            return base_cost * highway_penalty
+            # is_safeのみに基づいて重みを計算
+            return length * (safe_factor if is_safe else normal_factor)
 
         return weight_func
     
@@ -361,10 +345,10 @@ class RouteCalculator:
         destination: tuple[float, float],
     ) -> list[int]:
         """
-        A*アルゴリズムで徒歩ルート探索（距離最優先）
+        ダイクストラ法で徒歩ルート探索（距離最優先）
 
         安全度を考慮しない最短距離ルート。
-        徒歩は短距離なので、単純に「length」エッジ属性で探索。
+        ダイクストラ法を使用して純粋に距離のみに基づいた最短経路を計算。
 
         Args:
             origin: 出発地 (経度, 緯度)
@@ -376,8 +360,16 @@ class RouteCalculator:
         orig_node = self._find_nearest_node(origin[0], origin[1])
         dest_node = self._find_nearest_node(destination[0], destination[1])
 
-        # 徒歩は「length」でシンプルに探索（安全度考慮なし）
-        return self._find_path_astar(self.graph, orig_node, dest_node, weight='length')
+        # ダイクストラ法で最短経路を探索（ヒューリスティックなし）
+        try:
+            return nx.shortest_path(
+                self.graph,
+                source=orig_node,
+                target=dest_node,
+                weight='length'
+            )
+        except nx.NetworkXNoPath:
+            raise ValueError(f"No path found between origin and destination")
     
     def _calculate_route_info(self, route: list[int]) -> RouteResult:
         """ルートの詳細情報を計算"""
@@ -511,9 +503,10 @@ class RouteCalculator:
                 'total_duration': 総所要時間（秒）
             }
         """
-        parking = self._find_nearest_parking(destination, max_distance=800)
+        # 距離制限なしで最寄りの駐輪場を検索
+        parking = self._find_nearest_parking(destination)
         if parking is None:
-            raise ValueError("目的地付近に駐輪場が見つかりません")
+            raise ValueError("駐輪場が見つかりません")
 
         parking_coords = (parking.coordinates[0], parking.coordinates[1])
         bicycle_route = self.calculate_direct_route(origin, parking_coords, safety)
@@ -632,15 +625,29 @@ class RouteCalculator:
     # ヘルパーメソッド
     # =========================================================================
     
-    def _find_nearest_parking(self, location: tuple[float, float], max_distance: float = 500) -> Optional[Parking]:
-        """最寄りの駐輪場を検索"""
+    def _find_nearest_parking(self, location: tuple[float, float], max_distance: float = None) -> Optional[Parking]:
+        """
+        最寄りの駐輪場を検索
+
+        Args:
+            location: 基準位置 (経度, 緯度)
+            max_distance: 最大距離（メートル）。Noneの場合は距離制限なし
+
+        Returns:
+            最寄りの駐輪場、または見つからない場合はNone
+        """
+        if not self.parkings:
+            return None
+
         nearest = None
         min_dist = float('inf')
         for parking in self.parkings:
             dist = haversine_distance(location[0], location[1], parking.coordinates[0], parking.coordinates[1])
-            if dist < min_dist and dist <= max_distance:
-                min_dist = dist
-                nearest = parking
+            if dist < min_dist:
+                # max_distanceが指定されている場合はチェック
+                if max_distance is None or dist <= max_distance:
+                    min_dist = dist
+                    nearest = parking
         return nearest
     
     def _find_best_ports(
@@ -651,7 +658,13 @@ class RouteCalculator:
         min_bikes: int = 1,
         min_docks: int = 1,
     ) -> tuple[Optional[Port], Optional[Port]]:
-        """最適な借りるポートと返すポートを検索"""
+        """
+        最適な借りるポートと返すポートを検索（同じ会社のものを選ぶ）
+
+        borrowとreturnポートは同じoperatorのものを選択して、
+        会社を統一したシェアサイクル利用体験を提供する。
+        """
+        # 1. 借りるポートを探す
         borrow_port = None
         min_dist = float('inf')
         for port in ports:
@@ -660,14 +673,20 @@ class RouteCalculator:
                 if dist < min_dist:
                     min_dist = dist
                     borrow_port = port
-        
+
+        # borrowポートが見つからない場合は返却ポートも見つけられない
+        if borrow_port is None:
+            return None, None
+
+        # 2. borrowポートと同じ会社の返すポートを探す
         return_port = None
         min_dist = float('inf')
         for port in ports:
-            if port.docks_available >= min_docks:
+            # 同じ会社で、返却可能なドックがあるポート
+            if port.operator == borrow_port.operator and port.docks_available >= min_docks:
                 dist = haversine_distance(destination[0], destination[1], port.coordinates[0], port.coordinates[1])
                 if dist < min_dist:
                     min_dist = dist
                     return_port = port
-        
+
         return borrow_port, return_port

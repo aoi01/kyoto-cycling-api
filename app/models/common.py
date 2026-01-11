@@ -40,6 +40,7 @@ class ErrorDetail(BaseModel):
     エラーコード一覧:
         - INVALID_COORDINATES: 座標形式が不正
         - OUT_OF_SERVICE_AREA: 京都市外の座標
+        - LOCATION_MISMATCH: 現在位置と出発地が乖離している
         - NO_ROUTE_FOUND: ルートが見つからない
         - NO_PARKING_FOUND: 駐輪場が見つからない
         - NO_PORT_AVAILABLE: 利用可能なポートがない

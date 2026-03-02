@@ -79,8 +79,8 @@ class TestCalculateTurnAngle:
         assert 179.0 < angle <= 180.0
 
     def test_slight_right(self):
-        """緩やかな右カーブ"""
-        angle = calculate_turn_angle(0, 30)  # 北から北東へ
+        """緩やかな右カーブ（70-100度の範囲）"""
+        angle = calculate_turn_angle(0, 85)  # 北から東寄りへ
         assert TURN_THRESHOLDS['straight'] < angle < TURN_THRESHOLDS['slight']
 
 
@@ -88,22 +88,22 @@ class TestClassifyTurn:
     """ターン分類のテスト"""
 
     def test_classify_straight(self):
-        """直進の分類"""
-        turn_type = classify_turn(5)  # 5度は直進
+        """直進の分類（0-70度）"""
+        turn_type = classify_turn(50)  # 50度は直進（70度未満）
         assert turn_type == 'straight'
 
     def test_classify_slight(self):
-        """緩やかなカーブの分類"""
-        turn_type = classify_turn(30)  # 30度は緩やか
+        """緩やかなカーブの分類（70-100度）"""
+        turn_type = classify_turn(85)  # 85度は緩やか
         assert turn_type == 'slight'
 
     def test_classify_normal(self):
-        """通常のカーブの分類"""
-        turn_type = classify_turn(90)  # 90度は通常
+        """通常のカーブの分類（100-135度）"""
+        turn_type = classify_turn(120)  # 120度は通常
         assert turn_type == 'normal'
 
     def test_classify_sharp(self):
-        """急カーブの分類"""
+        """急カーブの分類（135度以上）"""
         turn_type = classify_turn(150)  # 150度は急
         assert turn_type == 'sharp'
 
@@ -112,25 +112,25 @@ class TestClassifyTurnWithDirection:
     """方向を考慮したターン分類のテスト"""
 
     def test_right_turn(self):
-        """右折の分類"""
-        # 北(0°)から東(90°)へ = 右折
-        turn_type = classify_turn_with_direction(90, 0, 90)
+        """右折の分類（100-135度）"""
+        # 北(0°)から南東(120°)へ = 右折
+        turn_type = classify_turn_with_direction(120, 0, 120)
         assert turn_type == 'right'
 
     def test_left_turn(self):
-        """左折の分類"""
-        # 北(0°)から西(270°)へ = 左折
-        turn_type = classify_turn_with_direction(90, 0, 270)
+        """左折の分類（100-135度）"""
+        # 北(0°)から南西(240°)へ = 左折（120度）
+        turn_type = classify_turn_with_direction(120, 0, 240)
         assert turn_type == 'left'
 
     def test_slight_right(self):
-        """緩やかな右カーブ"""
-        turn_type = classify_turn_with_direction(30, 0, 30)
+        """緩やかな右カーブ（70-100度）"""
+        turn_type = classify_turn_with_direction(85, 0, 85)
         assert turn_type == 'slight_right'
 
     def test_slight_left(self):
-        """緩やかな左カーブ"""
-        turn_type = classify_turn_with_direction(30, 0, 330)
+        """緩やかな左カーブ（70-100度）"""
+        turn_type = classify_turn_with_direction(85, 0, 275)
         assert turn_type == 'slight_left'
 
     def test_uturn(self):
@@ -139,8 +139,8 @@ class TestClassifyTurnWithDirection:
         assert turn_type == 'uturn'
 
     def test_straight_not_turn(self):
-        """直進はターンではない"""
-        turn_type = classify_turn_with_direction(10, 0, 10)
+        """直進はターンではない（0-70度）"""
+        turn_type = classify_turn_with_direction(50, 0, 50)
         assert turn_type == 'straight'
 
 
@@ -179,18 +179,18 @@ class TestCalculateTurnCostFromBearings:
     """方位角からの直接コスト計算テスト"""
 
     def test_straight_cost_from_bearings(self):
-        """直進時のコストは0"""
-        cost = calculate_turn_cost_from_bearings(0, 10)  # ほぼ直進
+        """直進時のコストは0（70度未満）"""
+        cost = calculate_turn_cost_from_bearings(0, 50)  # 50度は直進
         assert cost == 0
 
     def test_right_turn_cost_from_bearings(self):
-        """右折のコストは50m相当"""
-        cost = calculate_turn_cost_from_bearings(0, 90)  # 北から東へ
+        """右折のコスト（100-135度）"""
+        cost = calculate_turn_cost_from_bearings(0, 120)  # 北から南東へ
         assert cost == TURN_COSTS['right']
 
     def test_left_turn_cost_from_bearings(self):
-        """左折のコストは25m相当"""
-        cost = calculate_turn_cost_from_bearings(0, 270)  # 北から西へ
+        """左折のコスト（100-135度）"""
+        cost = calculate_turn_cost_from_bearings(0, 240)  # 北から南西へ
         assert cost == TURN_COSTS['left']
 
 

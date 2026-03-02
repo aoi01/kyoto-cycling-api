@@ -189,6 +189,78 @@ gcloud artifacts docker images delete \
     asia-northeast1-docker.pkg.dev/$PROJECT_ID/kyoto-cycling-api/api:latest
 ```
 
+推奨案：コスト最適化戦略
+🎯 推奨: ウォームアップ戦略（min=0のまま）
+常時起動は高額なので、以下の方法でコールドスタートを回避：
+1. 定期的なヘルスチェック（無料で実現）
+Google Cloud Schedulerで5分ごとにヘルスチェック：
+# Cloud Schedulerジョブ作成（無料枠: 3ジョブ/月）
+gcloud scheduler jobs create http kyoto-cycling-warmup \
+  --schedule="*/5 * * * *" \
+  --uri="https://kyoto-cycling-api-1073931533636.asia-northeast1.run.app/health" \
+  --http-method=GET \
+  --location=asia-northeast1
+効果:
+インスタンスが常にウォーム状態
+コールドスタートほぼ発生しない
+料金: 月約8,640リクエスト → 無料枠内
+料金試算:
+リクエスト: 8,640回/月（5分ごと）
+処理時間: 8,640回 × 0.5秒 = 4,320秒
+
+CPU: 4,320秒 × 2 vCPU = 8,640 vCPU秒 → 無料枠内
+メモリ: 4,320秒 × 2 GB = 8,640 GiB秒 → 無料枠内
+リクエスト数: 8,640回 → 無料枠内
+
+合計: $0.00
+2. フロントエンドでのローディング表示
+初回のみ少し遅い場合に備えて、React側でローディングUIを改善：
+// フロントエンドで初回リクエストのタイムアウトを長めに設定
+const apiClient = axios.create({
+  timeout: 15000, // 15秒
+  headers: { 'Content-Type': 'application/json' }
+});
+
+// ローディング中のUI
+{isLoading && (
+  <div className="loading-overlay">
+    <Spinner />
+    <p>ルートを計算中...</p>
+    {loadingTime > 3000 && (
+      <p className="text-sm">初回アクセスのため、少々お待ちください</p>
+    )}
+  </div>
+)}
+デプロイコマンド比較
+現在（オンデマンド）
+gcloud run deploy kyoto-cycling-api \
+  --min-instances 0 \
+  --max-instances 10
+月額: $0
+常時起動
+gcloud run deploy kyoto-cycling-api \
+  --min-instances 1 \
+  --max-instances 10
+月額: 約$64
+ウォームアップ戦略（推奨）
+# 1. デプロイはmin=0のまま
+gcloud run deploy kyoto-cycling-api \
+  --min-instances 0 \
+  --max-instances 10
+
+# 2. Cloud Schedulerでウォームアップ
+gcloud scheduler jobs create http kyoto-cycling-warmup \
+  --schedule="*/5 * * * *" \
+  --uri="https://YOUR-SERVICE-URL/health" \
+  --http-method=GET \
+  --location=asia-northeast1
+月額: $0（無料枠内）
+結論
+方法	月額コスト	レスポンス速度	おすすめ度
+オンデマンド（現状）	$0	❌ 遅い（初回）	⭐⭐
+常時起動（min=1）	$64	✅ 高速	⭐
+ウォームアップ戦略	$0	✅ 高速	⭐⭐⭐⭐⭐
+推奨: Cloud Schedulerで5分ごとにヘルスチェックを実行し、無料で常にウォーム状態を維持する方法が最適です。 Cloud Schedulerを設定しますか？
 ## 参考リンク
 
 - [Cloud Run ドキュメント](https://cloud.google.com/run/docs)

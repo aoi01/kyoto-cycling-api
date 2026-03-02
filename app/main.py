@@ -250,13 +250,15 @@ async def get_graph_info():
 
 @app.get("/debug/test-route", tags=["debug"])
 async def test_route(
-    safety: int = 5
+    safety: int = 5,
+    use_turn_costs: bool = True
 ):
     """
     テストルート計算（京都駅 → 二条城）
 
     Args:
-        safety: 安全度 1-10
+        safety: 安全度 1-5
+        use_turn_costs: ターンコストを考慮するか
     """
     route_calculator: RouteCalculator = app.state.route_calculator
 
@@ -264,19 +266,23 @@ async def test_route(
     destination = (135.7482, 35.0142)  # 二条城
 
     try:
-        result = route_calculator.calculate_direct_route(origin, destination, safety)
+        result = route_calculator.calculate_direct_route(origin, destination, safety, use_turn_costs)
 
         return {
             "success": True,
             "origin": "京都駅",
             "destination": "二条城",
             "safety": safety,
+            "use_turn_costs": use_turn_costs,
             "result": {
                 "distance": f"{result.distance:.0f}m",
                 "duration": f"{result.duration:.0f}s ({result.duration/60:.1f}min)",
                 "safety_score": result.safety_score,
                 "safe_road_ratio": f"{result.safe_distance/result.distance*100:.1f}%",
-                "nodes_count": len(result.nodes)
+                "nodes_count": len(result.nodes),
+                "turn_count": result.turn_count,
+                "right_turn_count": result.right_turn_count,
+                "left_turn_count": result.left_turn_count,
             }
         }
     except Exception as e:

@@ -5,19 +5,27 @@ app/services/route_calculator.py
 
 A*アルゴリズムとサブグラフ化による最適化されたルート探索を提供。
 安全道（is_safe属性）を考慮した重み付けルーティング。
+ターンコスト（右折ペナルティなど）も考慮。
 
 公式ドキュメント:
 - NetworkX A*: https://networkx.org/documentation/stable/reference/algorithms/generated/networkx.algorithms.shortest_paths.astar.astar_path.html
 - NetworkX subgraph_view: https://networkx.org/documentation/stable/reference/classes/generated/networkx.classes.graphviews.subgraph_view.html
 """
 import math
-from typing import Optional, Callable, Union
+import heapq
+from typing import Optional, Callable, Union, Tuple
 from dataclasses import dataclass
 import networkx as nx
 import numpy as np
 
 from app.models.parking import Parking
 from app.models.port import Port
+from app.services.turn_calculator import (
+    calculate_bearing,
+    calculate_turn_angle,
+    classify_turn_with_direction,
+    get_turn_cost,
+)
 
 
 # =============================================================================
@@ -28,7 +36,7 @@ from app.models.port import Port
 class RouteResult:
     """
     ルート計算結果
-    
+
     Attributes:
         nodes: ルートを構成するノードIDリスト
         coordinates: 座標リスト [[経度, 緯度], ...]
@@ -37,6 +45,9 @@ class RouteResult:
         safety_score: 安全スコア（0-10）
         safe_distance: 安全道の距離（メートル）
         normal_distance: 通常道の距離（メートル）
+        turn_count: ターン回数（直進以外の曲がり回数）
+        right_turn_count: 右折回数
+        left_turn_count: 左折回数
     """
     nodes: list[int]
     coordinates: list[list[float]]
@@ -45,6 +56,9 @@ class RouteResult:
     safety_score: float
     safe_distance: float
     normal_distance: float
+    turn_count: int = 0
+    right_turn_count: int = 0
+    left_turn_count: int = 0
 
 
 # =============================================================================
@@ -315,7 +329,7 @@ class RouteCalculator:
         dest_node: int,
         weight: Union[str, Callable],
     ) -> list[int]:
-        """A*アルゴリズムでルート探索"""
+        """A*アルゴリズムでルート探索（従来版、ターンコストなし）"""
         heuristic = create_heuristic(graph, dest_node)
         return nx.astar_path(
             graph,
@@ -324,20 +338,191 @@ class RouteCalculator:
             heuristic=heuristic,
             weight=weight,
         )
+
+    def _find_path_astar_with_turns(
+        self,
+        graph: nx.MultiDiGraph,
+        orig_node: int,
+        dest_node: int,
+        safety: int,
+    ) -> list[int]:
+        """
+        ターンコストを考慮したカスタムA*アルゴリズム
+
+        非エンジニア向け解説:
+            通常のルート探索は「距離」だけを見るが、
+            このメソッドは「曲がるコスト」も考慮する。
+            特に右折は高コスト（危険）なので、
+            「少し遠回りでも左折や直進を優先」するルートを見つける。
+
+        仕組み:
+            1. 優先度キュー（行きたい順に並べたリスト）で探索
+            2. 各状態は (現在ノード, 前のノード) で表現
+            3. 次のノードに進む際、ターンコストを計算して追加
+
+        Args:
+            graph: 道路グラフ
+            orig_node: 出発ノード
+            dest_node: 目的ノード
+            safety: 安全度（1-5）
+
+        Returns:
+            ノードIDのリスト（ルート）
+        """
+        # ヒューリスティック関数（目的地方向への優先探索）
+        target_x = graph.nodes[dest_node]['x']
+        target_y = graph.nodes[dest_node]['y']
+
+        def heuristic(node: int) -> float:
+            node_x = graph.nodes[node]['x']
+            node_y = graph.nodes[node]['y']
+            return haversine_distance(node_x, node_y, target_x, target_y)
+
+        # 安全度に応じた係数を取得
+        safe_factor, normal_factor = WeightCalculator.get_factors(safety)
+
+        def get_edge_cost(u: int, v: int, data: dict) -> float:
+            """エッジの基本コスト（距離 × 安全度係数）"""
+            length = data.get('length', 10)
+            is_safe = data.get('is_safe', False)
+            return length * (safe_factor if is_safe else normal_factor)
+
+        def calculate_turn_cost_at_node(
+            prev_node: int,
+            current_node: int,
+            next_node: int
+        ) -> float:
+            """
+            ノードでのターンコストを計算
+
+            非エンジニア向け解説:
+                「前の道」から「次の道」に曲がる時のコスト
+                - 直進: 0
+                - 左折: 25m相当
+                - 右折: 50m相当（危険！）
+            """
+            if prev_node is None:
+                return 0.0
+
+            # 各ノードの座標を取得
+            prev_x = graph.nodes[prev_node]['x']
+            prev_y = graph.nodes[prev_node]['y']
+            curr_x = graph.nodes[current_node]['x']
+            curr_y = graph.nodes[current_node]['y']
+            next_x = graph.nodes[next_node]['x']
+            next_y = graph.nodes[next_node]['y']
+
+            # 方位角を計算
+            bearing_in = calculate_bearing(prev_x, prev_y, curr_x, curr_y)
+            bearing_out = calculate_bearing(curr_x, curr_y, next_x, next_y)
+
+            # ターン角度を計算
+            turn_angle = calculate_turn_angle(bearing_in, bearing_out)
+
+            # ターンの種類を分類（右折/左折を区別）
+            turn_type = classify_turn_with_direction(
+                turn_angle, bearing_in, bearing_out
+            )
+
+            # コストを取得
+            return get_turn_cost(turn_type)
+
+        # 優先度キュー: (推定コスト, 現在コスト, 現在ノード, 前のノード, 経路)
+        # heapqは最小値を先頭に保つデータ構造
+        start_state = (heuristic(orig_node), 0.0, orig_node, None, [orig_node])
+        open_set = [start_state]
+
+        # 訪問済み状態: (ノード, 前のノード) -> 最小コスト
+        # 同じ場所でも「どこから来たか」が違えば別の状態として扱う
+        visited = {}
+
+        while open_set:
+            # コスト最小の状態を取り出す
+            estimated_cost, current_cost, current_node, prev_node, path = heapq.heappop(open_set)
+
+            # 目的地に到達
+            if current_node == dest_node:
+                return path
+
+            # 状態キー（ノードと前のノードの組み合わせ）
+            state_key = (current_node, prev_node)
+
+            # 既により低コストで訪問済みならスキップ
+            if state_key in visited and visited[state_key] <= current_cost:
+                continue
+            visited[state_key] = current_cost
+
+            # 隣接ノードを探索
+            for next_node in graph.successors(current_node):
+                # 前のノードに戻らない（Uターン回避の補助）
+                if next_node == prev_node:
+                    continue
+
+                # エッジデータを取得（複数エッジがある場合は最小コストを選択）
+                edge_data_dict = graph.get_edge_data(current_node, next_node)
+                if not edge_data_dict:
+                    continue
+
+                # 最小コストのエッジを選択
+                best_edge_cost = float('inf')
+                for key, data in edge_data_dict.items():
+                    edge_cost = get_edge_cost(current_node, next_node, data)
+                    if edge_cost < best_edge_cost:
+                        best_edge_cost = edge_cost
+
+                # ターンコストを計算
+                turn_cost = calculate_turn_cost_at_node(
+                    prev_node, current_node, next_node
+                )
+
+                # 合計コスト
+                new_cost = current_cost + best_edge_cost + turn_cost
+
+                # 新しい状態
+                next_state_key = (next_node, current_node)
+                if next_state_key not in visited or visited[next_state_key] > new_cost:
+                    new_estimated = new_cost + heuristic(next_node)
+                    new_state = (new_estimated, new_cost, next_node, current_node, path + [next_node])
+                    heapq.heappush(open_set, new_state)
+
+        # 経路が見つからない
+        raise nx.NetworkXNoPath(f"No path from {orig_node} to {dest_node}")
     
     def _find_route(
         self,
         origin: tuple[float, float],
         destination: tuple[float, float],
         safety: int,
+        use_turn_costs: bool = True,
     ) -> list[int]:
-        """A*アルゴリズムでルート探索（全グラフを対象）"""
+        """
+        A*アルゴリズムでルート探索（全グラフを対象）
+
+        Args:
+            origin: 出発地 (経度, 緯度)
+            destination: 目的地 (経度, 緯度)
+            safety: 安全度 (1-5)
+            use_turn_costs: ターンコストを考慮するか（デフォルト: True）
+
+        Returns:
+            ノードIDのリスト
+
+        非エンジニア向け解説:
+            use_turn_costs=True なら「曲がりにくいルート」を優先
+            use_turn_costs=False なら「距離優先」（従来の動作）
+        """
         orig_node = self._find_nearest_node(origin[0], origin[1])
         dest_node = self._find_nearest_node(destination[0], destination[1])
 
-        weight = self._get_weight(safety)
-
-        return self._find_path_astar(self.graph, orig_node, dest_node, weight)
+        if use_turn_costs:
+            # ターンコスト考慮版のカスタムA*
+            return self._find_path_astar_with_turns(
+                self.graph, orig_node, dest_node, safety
+            )
+        else:
+            # 従来のA*（ターンコストなし）
+            weight = self._get_weight(safety)
+            return self._find_path_astar(self.graph, orig_node, dest_node, weight)
 
     def _find_walk_route(
         self,
@@ -372,16 +557,34 @@ class RouteCalculator:
             raise ValueError(f"No path found between origin and destination")
     
     def _calculate_route_info(self, route: list[int]) -> RouteResult:
-        """ルートの詳細情報を計算"""
+        """
+        ルートの詳細情報を計算
+
+        非エンジニア向け解説:
+            ルートが決まった後、以下の情報を計算する：
+            - 総距離
+            - 安全な道の距離
+            - 曲がった回数（右折・左折それぞれ）
+        """
         coordinates = []
         total_distance = 0.0
         safe_distance = 0.0
         normal_distance = 0.0
 
+        # ターン統計
+        turn_count = 0
+        right_turn_count = 0
+        left_turn_count = 0
+
         for node in route:
             x = self.graph.nodes[node]['x']
             y = self.graph.nodes[node]['y']
             coordinates.append([x, y])
+
+        # GeoJSON LineStringは最低2点必要
+        # 同じノードの場合は重複させて2点にする
+        if len(coordinates) == 1:
+            coordinates = [coordinates[0], coordinates[0].copy()]
 
         for u, v in zip(route[:-1], route[1:]):
             edge_data = self.graph.get_edge_data(u, v)
@@ -400,6 +603,35 @@ class RouteCalculator:
                 else:
                     normal_distance += min_length
 
+        # ターン統計を計算（3ノード以上の場合）
+        if len(route) >= 3:
+            for i in range(1, len(route) - 1):
+                prev_node = route[i - 1]
+                curr_node = route[i]
+                next_node = route[i + 1]
+
+                # 座標を取得
+                prev_x = self.graph.nodes[prev_node]['x']
+                prev_y = self.graph.nodes[prev_node]['y']
+                curr_x = self.graph.nodes[curr_node]['x']
+                curr_y = self.graph.nodes[curr_node]['y']
+                next_x = self.graph.nodes[next_node]['x']
+                next_y = self.graph.nodes[next_node]['y']
+
+                # ターンを計算
+                bearing_in = calculate_bearing(prev_x, prev_y, curr_x, curr_y)
+                bearing_out = calculate_bearing(curr_x, curr_y, next_x, next_y)
+                turn_angle = calculate_turn_angle(bearing_in, bearing_out)
+                turn_type = classify_turn_with_direction(turn_angle, bearing_in, bearing_out)
+
+                # ターン統計を更新
+                if turn_type != 'straight':
+                    turn_count += 1
+                    if 'right' in turn_type:
+                        right_turn_count += 1
+                    elif 'left' in turn_type:
+                        left_turn_count += 1
+
         safety_score = (safe_distance / total_distance * 10) if total_distance > 0 else 5.0
         duration = total_distance / self.BICYCLE_SPEED
 
@@ -411,6 +643,9 @@ class RouteCalculator:
             safety_score=round(safety_score, 1),
             safe_distance=safe_distance,
             normal_distance=normal_distance,
+            turn_count=turn_count,
+            right_turn_count=right_turn_count,
+            left_turn_count=left_turn_count,
         )
 
     def _calculate_walk_route_info(self, route: list[int]) -> dict:
@@ -431,6 +666,10 @@ class RouteCalculator:
             x = self.graph.nodes[node]['x']
             y = self.graph.nodes[node]['y']
             coordinates.append([x, y])
+
+        # GeoJSON LineStringは最低2点必要
+        if len(coordinates) == 1:
+            coordinates = [coordinates[0], coordinates[0].copy()]
 
         for u, v in zip(route[:-1], route[1:]):
             edge_data = self.graph.get_edge_data(u, v)
@@ -462,6 +701,7 @@ class RouteCalculator:
         origin: tuple[float, float],
         destination: tuple[float, float],
         safety: int,
+        use_turn_costs: bool = True,
     ) -> RouteResult:
         """
         直接ルート計算（UC-2）
@@ -474,11 +714,19 @@ class RouteCalculator:
             origin: 出発地 (経度, 緯度)
             destination: 目的地 (経度, 緯度)
             safety: 安全度 (1-5)
+            use_turn_costs: ターンコストを考慮するか（デフォルト: True）
+                - True: 「安全な道」＋「曲がりにくい」を優先
+                - False: 従来通り距離優先
 
         Returns:
             RouteResult
+
+        非エンジニア向け解説:
+            この関数を呼ぶと、2地点間の最適な自転車ルートを計算。
+            use_turn_costs=True（デフォルト）なら、
+            「右折を避ける」「曲がる回数を減らす」ことを考慮したルートになる。
         """
-        route = self._find_route(origin, destination, safety)
+        route = self._find_route(origin, destination, safety, use_turn_costs)
         return self._calculate_route_info(route)
     
     def calculate_route_with_parking(
@@ -583,11 +831,20 @@ class RouteCalculator:
             # ルートが見つからない場合は直線距離にフォールバック
             print(f"Walk route to port not found: {e}. Using haversine distance as fallback.")
             walk_distance = haversine_distance(origin[0], origin[1], borrow_coords[0], borrow_coords[1])
-            walk_to_port_info = {
-                'coordinates': [list(origin), list(borrow_coords)],
-                'distance': walk_distance,
-                'duration': walk_distance / self.WALK_SPEED,
-            }
+            # 座標が1つしかない場合は重複させる
+            if len(origin) == 1 or len(borrow_coords) == 1:
+                walk_to_port_info = {
+                    'coordinates': [list(origin), list(origin), list(borrow_coords)],
+                    'distance': 0,
+                    'duration': 0,
+                }
+            else:
+                    # 座標が同じ場合は2点にする
+                    walk_to_port_info = {
+                        'coordinates': [list(borrow_coords), list(borrow_coords), list(destination)],
+                        'distance': 0,
+                        'duration': 0,
+                    }
 
         # レンタルポート→返却ポートの自転車ルート
         bicycle_route = self.calculate_direct_route(borrow_coords, return_coords, safety)

@@ -302,7 +302,7 @@ async def _handle_direct_route(
                 name="目的地",
             ),
             route=RouteGeometry(
-                geometry=GeoJSONLineString(coordinates=result.coordinates),
+                geometry=GeoJSONLineString(coordinates=_ensure_min_coordinates(result.coordinates)),
                 distance=result.distance,
                 duration=result.duration,
                 safety_score=result.safety_score,
@@ -349,6 +349,10 @@ async def _handle_parking_route(
         # 自前で音声指示を生成（origin → parking）
         voice_instructions = VoiceInstructionGenerator.generate_instructions(bicycle_route.coordinates)
 
+        # 座標配列の長さを確保
+        bicycle_coords = _ensure_min_coordinates(bicycle_route.coordinates)
+        walk_coords = _ensure_min_coordinates(result['walk_route']['coordinates'])
+
         # セグメント作成
         segments = [
             # 自転車区間: origin → parking
@@ -367,7 +371,7 @@ async def _handle_parking_route(
                     fee_description=parking.fee_description,
                 ),
                 route=RouteGeometry(
-                    geometry=GeoJSONLineString(coordinates=bicycle_route.coordinates),
+                    geometry=GeoJSONLineString(coordinates=bicycle_coords),
                     distance=bicycle_route.distance,
                     duration=bicycle_route.duration,
                     safety_score=bicycle_route.safety_score,
@@ -388,7 +392,7 @@ async def _handle_parking_route(
                     name="目的地",
                 ),
                 route=RouteGeometry(
-                    geometry=GeoJSONLineString(coordinates=result['walk_route']['coordinates']),
+                    geometry=GeoJSONLineString(coordinates=walk_coords),
                     distance=result['walk_distance'],
                     duration=result['walk_duration'],
                     safety_score=None,
@@ -416,6 +420,17 @@ async def _handle_parking_route(
         if "NetworkXNoPath" in str(e):
             return create_error_response("NO_ROUTE_FOUND", "ルートが見つかりませんでした")
         raise
+
+
+def _ensure_min_coordinates(coords: list[list[float]], min_length: int = 2) -> list[list[float]]:
+    """
+    座標配列が最低min_length個の要素を持つようにする
+
+    GeoJSON LineStringは最低2点必要なため、1点しかない場合は重複させる
+    """
+    if len(coords) < min_length:
+        return [coords[0] if coords else [0.0, 0.0]] * min_length
+    return coords
 
 
 async def _handle_share_cycle_route(
@@ -453,6 +468,10 @@ async def _handle_share_cycle_route(
         # 自前で音声指示を生成（borrow_port → return_port）
         voice_instructions = VoiceInstructionGenerator.generate_instructions(bicycle_route.coordinates)
 
+        # 座標配列の長さを確保
+        walk_to_coords = _ensure_min_coordinates(result['walk_to_port_route']['coordinates'])
+        walk_from_coords = _ensure_min_coordinates(result['walk_from_port_route']['coordinates'])
+
         # セグメント作成
         segments = [
             # 徒歩区間: origin → borrow_port（A*で探索した実際のルート）
@@ -470,7 +489,7 @@ async def _handle_share_cycle_route(
                     id=borrow_port.id,
                 ),
                 route=RouteGeometry(
-                    geometry=GeoJSONLineString(coordinates=result['walk_to_port_route']['coordinates']),
+                    geometry=GeoJSONLineString(coordinates=walk_to_coords),
                     distance=result['walk_to_port'],
                     duration=result['walk_to_port_route']['duration'],
                     safety_score=None,
@@ -493,7 +512,7 @@ async def _handle_share_cycle_route(
                     id=return_port.id,
                 ),
                 route=RouteGeometry(
-                    geometry=GeoJSONLineString(coordinates=bicycle_route.coordinates),
+                    geometry=GeoJSONLineString(coordinates=_ensure_min_coordinates(bicycle_route.coordinates)),
                     distance=bicycle_route.distance,
                     duration=bicycle_route.duration,
                     safety_score=bicycle_route.safety_score,
@@ -514,7 +533,7 @@ async def _handle_share_cycle_route(
                     name="目的地",
                 ),
                 route=RouteGeometry(
-                    geometry=GeoJSONLineString(coordinates=result['walk_from_port_route']['coordinates']),
+                    geometry=GeoJSONLineString(coordinates=walk_from_coords),
                     distance=result['walk_from_port'],
                     duration=result['walk_from_port_route']['duration'],
                     safety_score=None,
@@ -540,7 +559,8 @@ async def _handle_share_cycle_route(
         return create_error_response("NO_PORT_AVAILABLE", str(e))
     except Exception as e:
         if "NetworkXNoPath" in str(e):
-            return create_error_response("NO_ROUTE_FOUND", "ルートが見つかりませんでした")
+            return create_error_response("NO_ROUTE_FOUND", "ルートが見つかりません")
+        print(f"Share cycle route error: {e}")
         raise
 
 

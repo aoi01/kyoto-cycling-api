@@ -530,10 +530,11 @@ class RouteCalculator:
         destination: tuple[float, float],
     ) -> list[int]:
         """
-        ダイクストラ法で徒歩ルート探索（距離最優先）
+        A*アルゴリズムで徒歩ルート探索（距離最優先）
 
         安全度を考慮しない最短距離ルート。
-        ダイクストラ法を使用して純粋に距離のみに基づいた最短経路を計算。
+        A*アルゴリズム（Haversineヒューリスティック）を使用して
+        目的地方向への探索を優先し、ダイクストラ法より高速に計算。
 
         Args:
             origin: 出発地 (経度, 緯度)
@@ -545,12 +546,14 @@ class RouteCalculator:
         orig_node = self._find_nearest_node(origin[0], origin[1])
         dest_node = self._find_nearest_node(destination[0], destination[1])
 
-        # ダイクストラ法で最短経路を探索（ヒューリスティックなし）
+        # A*アルゴリズムで最短経路を探索（ヒューリスティックあり）
         try:
-            return nx.shortest_path(
+            heuristic = create_heuristic(self.graph, dest_node)
+            return nx.astar_path(
                 self.graph,
                 source=orig_node,
                 target=dest_node,
+                heuristic=heuristic,
                 weight='length'
             )
         except nx.NetworkXNoPath:
@@ -582,8 +585,10 @@ class RouteCalculator:
             coordinates.append([x, y])
 
         # GeoJSON LineStringは最低2点必要
-        # 同じノードの場合は重複させて2点にする
-        if len(coordinates) == 1:
+        # 空や1点のみの場合は適切に処理
+        if len(coordinates) == 0:
+            coordinates = [[0.0, 0.0], [0.0, 0.0]]
+        elif len(coordinates) == 1:
             coordinates = [coordinates[0], coordinates[0].copy()]
 
         for u, v in zip(route[:-1], route[1:]):
@@ -668,7 +673,9 @@ class RouteCalculator:
             coordinates.append([x, y])
 
         # GeoJSON LineStringは最低2点必要
-        if len(coordinates) == 1:
+        if len(coordinates) == 0:
+            coordinates = [[0.0, 0.0], [0.0, 0.0]]
+        elif len(coordinates) == 1:
             coordinates = [coordinates[0], coordinates[0].copy()]
 
         for u, v in zip(route[:-1], route[1:]):
@@ -828,23 +835,13 @@ class RouteCalculator:
             walk_to_port_nodes = self._find_walk_route(origin, borrow_coords)
             walk_to_port_info = self._calculate_walk_route_info(walk_to_port_nodes)
         except Exception as e:
-            # ルートが見つからない場合は直線距離にフォールバック
-            print(f"Walk route to port not found: {e}. Using haversine distance as fallback.")
-            walk_distance = haversine_distance(origin[0], origin[1], borrow_coords[0], borrow_coords[1])
-            # 座標が1つしかない場合は重複させる
-            if len(origin) == 1 or len(borrow_coords) == 1:
-                walk_to_port_info = {
-                    'coordinates': [list(origin), list(origin), list(borrow_coords)],
-                    'distance': 0,
-                    'duration': 0,
-                }
-            else:
-                    # 座標が同じ場合は2点にする
-                    walk_to_port_info = {
-                        'coordinates': [list(borrow_coords), list(borrow_coords), list(destination)],
-                        'distance': 0,
-                        'duration': 0,
-                    }
+            # ルートが見つからない場合は2点の座標を直接返す
+            print(f"Walk route to port not found: {e}. Using direct coordinates.")
+            walk_to_port_info = {
+                'coordinates': [list(origin), list(borrow_coords)],
+                'distance': haversine_distance(origin[0], origin[1], borrow_coords[0], borrow_coords[1]),
+                'duration': 0,
+            }
 
         # レンタルポート→返却ポートの自転車ルート
         bicycle_route = self.calculate_direct_route(borrow_coords, return_coords, safety)

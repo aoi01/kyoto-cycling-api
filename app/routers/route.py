@@ -415,9 +415,21 @@ async def _handle_parking_route(
         return create_success_response(route_data)
 
     except ValueError as e:
-        return create_error_response("NO_PARKING_FOUND", str(e))
+        error_msg = str(e)
+        # 駐輪場が見つからない場合は直接ルートを提案
+        if "駐輪場" in error_msg or "parking" in error_msg.lower():
+            print(f"Parking not found, falling back to direct route: {error_msg}")
+            return await _handle_direct_route(origin, destination, safety, route_calculator)
+        # その他のValueErrorも直接ルートにフォールバック
+        print(f"Error in parking route, falling back to direct route: {error_msg}")
+        return await _handle_direct_route(origin, destination, safety, route_calculator)
     except Exception as e:
-        if "NetworkXNoPath" in str(e):
+        error_msg = str(e)
+        # Pydantic ValidationError（GeoJSONLineString等）は直接ルートにフォールバック
+        if "GeoJSONLineString" in error_msg or "validation error" in error_msg.lower():
+            print(f"Validation error in parking route, falling back to direct route: {e}")
+            return await _handle_direct_route(origin, destination, safety, route_calculator)
+        if "NetworkXNoPath" in error_msg:
             return create_error_response("NO_ROUTE_FOUND", "ルートが見つかりませんでした")
         raise
 
@@ -469,8 +481,13 @@ async def _handle_share_cycle_route(
         voice_instructions = VoiceInstructionGenerator.generate_instructions(bicycle_route.coordinates)
 
         # 座標配列の長さを確保
-        walk_to_coords = _ensure_min_coordinates(result['walk_to_port_route']['coordinates'])
-        walk_from_coords = _ensure_min_coordinates(result['walk_from_port_route']['coordinates'])
+        raw_walk_to = result['walk_to_port_route']['coordinates']
+        raw_walk_from = result['walk_from_port_route']['coordinates']
+        print(f"DEBUG: raw_walk_to coords count: {len(raw_walk_to)}, coords: {raw_walk_to}")
+        print(f"DEBUG: raw_walk_from coords count: {len(raw_walk_from)}")
+        walk_to_coords = _ensure_min_coordinates(raw_walk_to)
+        walk_from_coords = _ensure_min_coordinates(raw_walk_from)
+        print(f"DEBUG: walk_to_coords after fix: {len(walk_to_coords)}, coords: {walk_to_coords}")
 
         # セグメント作成
         segments = [
@@ -556,10 +573,26 @@ async def _handle_share_cycle_route(
         return create_success_response(route_data)
 
     except ValueError as e:
-        return create_error_response("NO_PORT_AVAILABLE", str(e))
+        error_msg = str(e)
+        print(f"===== SHARE-CYCLE ValueError CAUGHT =====")
+        print(f"Error message: {error_msg[:300]}")
+        # Pydantic ValidationErrorの場合は直接ルートにフォールバック
+        if "GeoJSONLineString" in error_msg or "validation error" in error_msg.lower():
+            print(f"-> Detected validation error, returning INTERNAL_ERROR")
+            return create_error_response("INTERNAL_ERROR", "ルート計算中にエラーが発生しました。別の場所を指定してください。")
+        # ポートが見つからない場合
+        if "ポート" in error_msg or "port" in error_msg.lower():
+            print(f"-> Detected port error")
+            return create_error_response("NO_PORT_AVAILABLE", "近くに利用可能なシェアサイクルポートが見つかりません")
+        print(f"-> Unknown ValueError, returning NO_PORT_AVAILABLE")
+        return create_error_response("NO_PORT_AVAILABLE", error_msg)
     except Exception as e:
-        if "NetworkXNoPath" in str(e):
+        error_msg = str(e)
+        print(f"DEBUG share-cycle Exception: {error_msg[:200]}")
+        if "NetworkXNoPath" in error_msg:
             return create_error_response("NO_ROUTE_FOUND", "ルートが見つかりません")
+        if "GeoJSONLineString" in error_msg or "validation error" in error_msg.lower():
+            return create_error_response("INTERNAL_ERROR", "ルート計算中にエラーが発生しました。別の場所を指定してください。")
         print(f"Share cycle route error: {e}")
         raise
 

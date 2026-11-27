@@ -8,6 +8,11 @@ pytest共通フィクスチャ
 - httpx TestClient: https://www.python-httpx.org/advanced/testing/
 - FastAPI Testing: https://fastapi.tiangolo.com/tutorial/testing/
 """
+import os
+
+# デバッグ用エンドポイントのテストがあるため、app を import する前に有効化する
+os.environ.setdefault("ENABLE_DEBUG_ENDPOINTS", "true")
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 from datetime import datetime

@@ -19,7 +19,7 @@ from typing import Optional
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import FastAPI
+from fastapi import APIRouter, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.services.route_calculator import RouteCalculator
@@ -38,6 +38,8 @@ class Settings:
     """アプリケーション設定"""
     MAPBOX_ACCESS_TOKEN: str = os.getenv("MAPBOX_ACCESS_TOKEN", "")
     GRAPH_PATH: str = os.getenv("GRAPH_PATH", "app/data/graph/kyoto_bike_graph.pkl")
+    # デバッグ用エンドポイント（/debug/*）を公開するか。本番では設定しない
+    ENABLE_DEBUG_ENDPOINTS: bool = os.getenv("ENABLE_DEBUG_ENDPOINTS", "").lower() in ("1", "true", "yes")
 
     # CORS設定
     CORS_ORIGINS: list[str] = [
@@ -218,7 +220,11 @@ async def health_check():
     return {"status": "healthy"}
 
 
-@app.get("/debug/config", tags=["debug"])
+# デバッグ用ルーター（ENABLE_DEBUG_ENDPOINTS が有効なときだけ登録する）
+debug_router = APIRouter()
+
+
+@debug_router.get("/debug/config", tags=["debug"])
 async def get_config():
     """設定確認（デバッグ用）"""
     token = settings.MAPBOX_ACCESS_TOKEN
@@ -229,7 +235,7 @@ async def get_config():
     }
 
 
-@app.get("/debug/graph-info", tags=["debug"])
+@debug_router.get("/debug/graph-info", tags=["debug"])
 async def get_graph_info():
     """グラフ情報を取得（デバッグ用）"""
     graph = app.state.graph
@@ -248,7 +254,7 @@ async def get_graph_info():
     }
 
 
-@app.get("/debug/test-route", tags=["debug"])
+@debug_router.get("/debug/test-route", tags=["debug"])
 async def test_route(
     safety: int = 5,
     use_turn_costs: bool = True
@@ -292,7 +298,7 @@ async def test_route(
         }
 
 
-@app.get("/debug/weight-factors", tags=["debug"])
+@debug_router.get("/debug/weight-factors", tags=["debug"])
 async def get_weight_factors():
     """
     安全度ごとの重み係数を表示
@@ -317,6 +323,10 @@ async def get_weight_factors():
         "description": "100mの道路に対するコスト（重み）",
         "factors": factors
     }
+
+
+if settings.ENABLE_DEBUG_ENDPOINTS:
+    app.include_router(debug_router)
 
 
 # =============================================================================

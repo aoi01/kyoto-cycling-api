@@ -10,7 +10,11 @@ GET /api/route - ルート検索
 - FastAPI Dependencies: https://fastapi.tiangolo.com/tutorial/dependencies/
 - Pydantic Validation: https://docs.pydantic.dev/latest/concepts/validators/
 """
+import asyncio
+import logging
 from typing import Annotated, Optional
+
+import networkx as nx
 from fastapi import APIRouter, Query, Depends, HTTPException
 
 from app.models import (
@@ -39,6 +43,7 @@ from app.services.voice_generator import VoiceInstructionGenerator
 # =============================================================================
 
 router = APIRouter(prefix="/api", tags=["route"])
+logger = logging.getLogger(__name__)
 
 
 # =============================================================================
@@ -254,9 +259,10 @@ async def search_route(
 
     except ValueError as e:
         return create_error_response("INVALID_COORDINATES", str(e))
-    except Exception as e:
-        print(f"Route search error: {e}")
-        return create_error_response("INTERNAL_ERROR", f"内部エラー: {str(e)}")
+    except Exception:
+        # 詳細はサーバーログにだけ残し、クライアントには内部情報を返さない
+        logger.exception("Route search error")
+        return create_error_response("INTERNAL_ERROR", "ルート計算中に内部エラーが発生しました")
 
 
 # =============================================================================
@@ -282,8 +288,10 @@ async def _handle_direct_route(
         ApiResponse[RouteData]
     """
     try:
-        # ルート計算
-        result = route_calculator.calculate_direct_route(origin, destination, safety)
+        # ルート計算（CPU負荷が高いのでスレッドで実行し、イベントループを止めない）
+        result = await asyncio.to_thread(
+            route_calculator.calculate_direct_route, origin, destination, safety
+        )
 
         # 自前で音声指示を生成（VoiceInstructionGeneratorを使用）
         voice_instructions = VoiceInstructionGenerator.generate_instructions(result.coordinates)
@@ -324,10 +332,8 @@ async def _handle_direct_route(
 
         return create_success_response(route_data)
 
-    except Exception as e:
-        if "NetworkXNoPath" in str(e):
-            return create_error_response("NO_ROUTE_FOUND", "ルートが見つかりませんでした")
-        raise
+    except nx.NetworkXNoPath:
+        return create_error_response("NO_ROUTE_FOUND", "ルートが見つかりませんでした")
 
 
 async def _handle_parking_route(
@@ -340,8 +346,10 @@ async def _handle_parking_route(
     駐輪場経由ルートを処理（UC-1）
     """
     try:
-        # ルート計算
-        result = route_calculator.calculate_route_with_parking(origin, destination, safety)
+        # ルート計算（スレッドで実行）
+        result = await asyncio.to_thread(
+            route_calculator.calculate_route_with_parking, origin, destination, safety
+        )
 
         parking = result['parking']
         bicycle_route = result['bicycle_route']
@@ -423,14 +431,14 @@ async def _handle_parking_route(
         # その他のValueErrorも直接ルートにフォールバック
         print(f"Error in parking route, falling back to direct route: {error_msg}")
         return await _handle_direct_route(origin, destination, safety, route_calculator)
+    except nx.NetworkXNoPath:
+        return create_error_response("NO_ROUTE_FOUND", "ルートが見つかりませんでした")
     except Exception as e:
         error_msg = str(e)
         # Pydantic ValidationError（GeoJSONLineString等）は直接ルートにフォールバック
         if "GeoJSONLineString" in error_msg or "validation error" in error_msg.lower():
             print(f"Validation error in parking route, falling back to direct route: {e}")
             return await _handle_direct_route(origin, destination, safety, route_calculator)
-        if "NetworkXNoPath" in error_msg:
-            return create_error_response("NO_ROUTE_FOUND", "ルートが見つかりませんでした")
         raise
 
 
@@ -458,7 +466,7 @@ async def _handle_share_cycle_route(
     """
     try:
         # 事業者リストをパース
-        operator_list = operators.split(",") if operators else ["docomo"]
+        operator_list = [op.strip() for op in operators.split(",")] if operators else ["docomo"]
 
         # ポート情報取得
         ports_data = await gbfs_client.get_ports(operator_list)
@@ -469,8 +477,9 @@ async def _handle_share_cycle_route(
             )
 
         # ルート計算
-        result = route_calculator.calculate_share_cycle_route(
-            origin, destination, safety, ports_data.ports
+        result = await asyncio.to_thread(
+            route_calculator.calculate_share_cycle_route,
+            origin, destination, safety, ports_data.ports,
         )
 
         borrow_port = result['borrow_port']
@@ -483,11 +492,8 @@ async def _handle_share_cycle_route(
         # 座標配列の長さを確保
         raw_walk_to = result['walk_to_port_route']['coordinates']
         raw_walk_from = result['walk_from_port_route']['coordinates']
-        print(f"DEBUG: raw_walk_to coords count: {len(raw_walk_to)}, coords: {raw_walk_to}")
-        print(f"DEBUG: raw_walk_from coords count: {len(raw_walk_from)}")
         walk_to_coords = _ensure_min_coordinates(raw_walk_to)
         walk_from_coords = _ensure_min_coordinates(raw_walk_from)
-        print(f"DEBUG: walk_to_coords after fix: {len(walk_to_coords)}, coords: {walk_to_coords}")
 
         # セグメント作成
         segments = [
@@ -586,11 +592,10 @@ async def _handle_share_cycle_route(
             return create_error_response("NO_PORT_AVAILABLE", "近くに利用可能なシェアサイクルポートが見つかりません")
         print(f"-> Unknown ValueError, returning NO_PORT_AVAILABLE")
         return create_error_response("NO_PORT_AVAILABLE", error_msg)
+    except nx.NetworkXNoPath:
+        return create_error_response("NO_ROUTE_FOUND", "ルートが見つかりません")
     except Exception as e:
         error_msg = str(e)
-        print(f"DEBUG share-cycle Exception: {error_msg[:200]}")
-        if "NetworkXNoPath" in error_msg:
-            return create_error_response("NO_ROUTE_FOUND", "ルートが見つかりません")
         if "GeoJSONLineString" in error_msg or "validation error" in error_msg.lower():
             return create_error_response("INTERNAL_ERROR", "ルート計算中にエラーが発生しました。別の場所を指定してください。")
         print(f"Share cycle route error: {e}")
